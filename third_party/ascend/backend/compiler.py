@@ -362,9 +362,12 @@ def make_ttir(mod, metadata, opt):
     passes.common.add_symbol_dce(pm)
     passes.ttir.add_loop_unroll(pm)
     if opt.enable_graph_optimize:
-        ascend.passes.ttir.add_graph_optimize(pm, **_graph_optimize_kwargs(opt))
-    if AscendBackend.instrumentation:
-        AscendBackend.instrumentation.patch("ttir", pm, mod.context)
+        ascend.passes.ttir.add_graph_optimize(
+            pm,
+            ub_capacity_bytes=graph_ub_budget_bytes_for_arch(opt.target_arch),
+            compile_mode=opt.compile_mode,
+            compile_on_910_95=opt.compile_on_910_95,
+        )
     pm.run(mod, 'make_ttir')
     if opt.debug:
         dump_manager = get_dump_manager(metadata["hash"])

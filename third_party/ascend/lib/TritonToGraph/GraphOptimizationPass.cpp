@@ -32,9 +32,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/PatternMatch.h"
-#include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
-#include "mlir/Transforms/Passes.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -166,7 +164,7 @@ public:
   }
 
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<arith::ArithDialect, tensor::TensorDialect,
+    registry.insert<tensor::TensorDialect, arith::ArithDialect,
                     triton::TritonDialect>();
   }
 
@@ -296,17 +294,6 @@ GraphOptimizePass::getStableOptions(GraphOptimizationOptions &options) {
   options.coreNum = static_cast<unsigned>(cliCoreNum);
   options.compileMode = this->compileMode;
   options.compileOn91095 = this->compileOn91095;
-  options.independentAxisTensorize.enabledForCompileMode =
-      *compileMode != triton::ascend::CompileMode::SimtOnly;
-  options.independentAxisTensorize.iatAndPtsmEnabled =
-      isRuleEnabled(options.enabledRuleMask,
-                    GraphOptimizationRuleId::IndependentAxisTensorize) &&
-      isRuleEnabled(options.enabledRuleMask,
-                    GraphOptimizationRuleId::PersistentTaskStripMining);
-  options.persistentTaskStripMining.enabledForCompileMode =
-      *compileMode != triton::ascend::CompileMode::SimtOnly;
-  options.storeCoalescing.enabledForCompileMode =
-      *compileMode != triton::ascend::CompileMode::SimtOnly;
   return success();
 }
 
@@ -317,33 +304,17 @@ void GraphOptimizePass::runOnOperation() {
     return;
   }
 
-  // The narrowing and parked-histogram templates are valid only for
-  // 910_95/950 lowering. Keep A3 on its established TTIR and constrain the
-  // rewrite scope so unrelated dead operations remain visible to later graph
-  // analyses.
-  if (options.compileOn91095) {
-    SmallVector<Operation *> preGraphRewriteCandidates;
-    getOperation().walk([&](Operation *op) {
-      if (isNarrowUnsignedTensorCandidate(op) ||
-          isFoldHistogramParkingCandidate(op))
-        preGraphRewriteCandidates.push_back(op);
-    });
-    if (!preGraphRewriteCandidates.empty()) {
-      RewritePatternSet patterns(&getContext());
-      patterns.add<narrow_unsigned_tensor::Narrow, FoldHistogramParking>(
-          &getContext());
-      FrozenRewritePatternSet frozenPatterns(std::move(patterns));
-      GreedyRewriteConfig config;
-      config.setStrictness(GreedyRewriteStrictness::ExistingAndNewOps);
-      if (failed(applyOpPatternsGreedily(preGraphRewriteCandidates,
-                                         frozenPatterns, config))) {
-        signalPassFailure();
-        return;
-      }
-    }
+  // Simplify tensor values before constructing any graph analyses so layout
+  // rules observe the reduced workload, without retaining stale graph state.
+  RewritePatternSet patterns(&getContext());
+  patterns.add<narrow_unsigned_tensor::Narrow>(&getContext());
+  if (compileOn91095)
+    patterns.add<FoldHistogramParking>(&getContext());
+  if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
+    signalPassFailure();
+    return;
   }
 
-  ModuleOp module = getOperation();
   SmallVector<std::unique_ptr<GraphOptimizationRule>> ownedRules;
   populateBuiltinGraphOptimizationRules(options, ownedRules);
 

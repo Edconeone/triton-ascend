@@ -169,21 +169,9 @@ void init_triton_ascend_passes_ttir(py::module &&m) {
       "add_graph_optimize",
       [](mlir::PassManager &pm, std::uint64_t ruleMask,
          std::uint64_t maxRewritesPerFunction, std::uint64_t ubCapacityBytes,
-         std::uint64_t mappingUBCapacityBytes,
-         std::uint64_t storeCoalescingUBBudgetBytes,
-         const std::string &compileMode, std::uint64_t ubSafetyPercent,
-         std::uint64_t reservedUBBytes, std::uint64_t mappingL0ACapacityBytes,
-         std::uint64_t mappingL0BCapacityBytes,
-         std::uint64_t mappingL0CCapacityBytes, std::uint64_t l0SafetyPercent,
-         std::uint64_t coreNum, bool compileOn91095) {
-        if (ruleMask > std::numeric_limits<std::uint32_t>::max())
-          throw py::value_error("rule_mask must fit in uint32_t");
-        const auto graphRuleMask =
-            static_cast<mlir::triton::cfg::GraphOptimizationRuleMask>(ruleMask);
-        if (!mlir::triton::cfg::isValidGraphOptimizationRuleMask(
-                graphRuleMask)) {
-          throw py::value_error("rule_mask contains unknown graph rule bits");
-        }
+         const std::string &compileMode, bool compileOn91095) {
+        if (ruleMask > std::numeric_limits<std::uint16_t>::max())
+          throw py::value_error("rule_mask must fit in uint16_t");
         if (maxRewritesPerFunction > std::numeric_limits<unsigned>::max())
           throw py::value_error(
               "max_rewrites_per_function must fit in unsigned");
@@ -244,14 +232,7 @@ void init_triton_ascend_passes_ttir(py::module &&m) {
           mlir::triton::cfg::kDefaultGraphOptimizationRuleMask),
       py::arg("max_rewrites_per_function") = 64,
       py::arg("ub_capacity_bytes") = 0,
-      py::arg("mapping_ub_capacity_bytes") = 0,
-      py::arg("store_coalescing_ub_budget_bytes") = 0,
       py::arg("compile_mode") = "simd_simt_template",
-      py::arg("ub_safety_percent") = 80, py::arg("reserved_ub_bytes") = 0,
-      py::arg("mapping_l0a_capacity_bytes") = 0,
-      py::arg("mapping_l0b_capacity_bytes") = 0,
-      py::arg("mapping_l0c_capacity_bytes") = 0,
-      py::arg("l0_safety_percent") = 80, py::arg("core_num") = 0,
       py::arg("compile_on_910_95") = false);
 
   m.def("set_buffer_count", [](mlir::ModuleOp &module, const std::string &type,

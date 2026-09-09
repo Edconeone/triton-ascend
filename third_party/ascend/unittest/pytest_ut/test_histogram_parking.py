@@ -4,7 +4,6 @@ import pytest
 import torch
 import triton
 import triton.language as tl
-from triton.backends.ascend.utils import is_compile_on_910_95
 
 
 @triton.jit
@@ -46,11 +45,6 @@ def _check_parking(size, bins, park, wrong_mask, mask_kind, keep_raw=False):
 @pytest.mark.parametrize("park,wrong_mask", [(0, False), (1, False), (0, True)])
 @pytest.mark.parametrize("mask_kind", ["random", "none", "all"])
 def test_histogram_parking(size, bins, park, wrong_mask, mask_kind):
-    # The N=8192 zero-parking shapes exercise the A5 histogram path. On A3,
-    # their baseline TTIR exceeds UB capacity before graph optimization can
-    # lower it, irrespective of whether the correction mask matches.
-    if not is_compile_on_910_95() and size == 8192 and park == 0:
-        pytest.skip("A5-only zero-parking histogram shape exceeds A3 UB")
     _check_parking(size, bins, park, wrong_mask, mask_kind)
 
 

@@ -721,11 +721,6 @@ def test_make_ttir_passes_canonical_compile_mode_to_graph_optimize(compiler_modu
         "ub_capacity_bytes": 192 * 1024 * 80 // 100,
         "compile_mode": "simt_only",
         "compile_on_910_95": False,
-        "mapping_l0a_capacity_bytes": 64 * 1024,
-        "mapping_l0b_capacity_bytes": 64 * 1024,
-        "mapping_l0c_capacity_bytes": 128 * 1024,
-        "l0_safety_percent": 80,
-        "core_num": 0,
     }]
     assert events[-1] == "run_row"
     assert events.index(("loop_unroll", (), {})) < events.index("graph_optimize")
@@ -736,18 +731,6 @@ def test_make_ttir_disables_graph_pipeline(compiler_module, monkeypatch):
     events, graph_calls = _run_make_ttir_with_recorded_graph_options(compiler_module, monkeypatch, options)
     assert "graph_optimize" not in events
     assert graph_calls == []
-
-
-@pytest.mark.parametrize(
-    ("arch", "expected_enabled"),
-    (("Ascend910B1", False), ("Ascend910_9581", True), ("Ascend950PR_9579", True)),
-)
-def test_make_ttir_derives_radix_rewrite_gate_from_target(compiler_module, monkeypatch, arch, expected_enabled):
-    options = _parse_options(compiler_module, arch)
-    _, graph_calls = _run_make_ttir_with_recorded_graph_options(compiler_module, monkeypatch, options)
-
-    assert len(graph_calls) == 1
-    assert graph_calls[0]["compile_on_910_95"] is expected_enabled
 
 
 @pytest.mark.skip(reason="The case is not supported on Ascend 950, skipping for now. Will be fixed in future.")

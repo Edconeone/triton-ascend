@@ -37,7 +37,7 @@ inline Type i32Type(Type type, PatternRewriter &rewriter) {
 // Compute the low 32 bits without materializing wide bitwise temporaries.
 // Truncation commutes with these operations, but not with right shift.
 inline Value lowBits(Value value, PatternRewriter &rewriter,
-                     Operation *rootToReplace = nullptr, unsigned depth = 0) {
+                     unsigned depth = 0) {
   Location loc = value.getLoc();
   Type type = i32Type(value.getType(), rewriter);
   if (value.getType() == type)
@@ -57,20 +57,14 @@ inline Value lowBits(Value value, PatternRewriter &rewriter,
           loc, type, DenseElementsAttr::get(tensor, attr));
     return rewriter.create<arith::ConstantOp>(loc, attr);
   }
-  Operation *op = value.getDefiningOp();
-  // A shared producer may still be needed at its original width. Reuse its
-  // result instead of cloning its computation. The root being replaced is an
-  // exception: truncating that result would create a cycle after replacement.
-  if (depth < 8 && op && (op == rootToReplace || value.hasOneUse())) {
-    if (auto splat = dyn_cast<SplatOp>(op))
+  if (depth < 8) {
+    if (auto op = value.getDefiningOp<SplatOp>())
       return rewriter.create<SplatOp>(
-          loc, type,
-          lowBits(splat.getSrc(), rewriter, rootToReplace, depth + 1));
-    if (isa<arith::AndIOp, arith::OrIOp, arith::XOrIOp>(op)) {
-      Value lhs =
-          lowBits(op->getOperand(0), rewriter, rootToReplace, depth + 1);
-      Value rhs =
-          lowBits(op->getOperand(1), rewriter, rootToReplace, depth + 1);
+          loc, type, lowBits(op.getSrc(), rewriter, depth + 1));
+    Operation *op = value.getDefiningOp();
+    if (op && isa<arith::AndIOp, arith::OrIOp, arith::XOrIOp>(op)) {
+      Value lhs = lowBits(op->getOperand(0), rewriter, depth + 1);
+      Value rhs = lowBits(op->getOperand(1), rewriter, depth + 1);
       if (isa<arith::AndIOp>(op))
         return rewriter.create<arith::AndIOp>(loc, lhs, rhs);
       if (isa<arith::OrIOp>(op))
@@ -111,7 +105,7 @@ struct Narrow : RewritePattern {
                      (constant(rhs, mask) && mask <= UINT32_MAX));
       if (!masked && !(isU32(lhs) && isU32(rhs)))
         return failure();
-      result = lowBits(op->getResult(0), rewriter, op);
+      result = lowBits(op->getResult(0), rewriter);
     } else if (isa<arith::ShRSIOp, arith::ShRUIOp>(op)) {
       uint64_t shift;
       if (!isU32(op->getOperand(0)) || !constant(op->getOperand(1), shift) ||
