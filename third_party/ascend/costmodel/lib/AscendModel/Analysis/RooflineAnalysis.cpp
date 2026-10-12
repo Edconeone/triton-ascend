@@ -104,7 +104,8 @@ void RooflineAnalyzer::computeMetrics() {
       }
     }
     // Reduction ops
-    else if (isa<ReduceSumOp, ReduceMaxOp, ReduceMinOp, ReduceProdOp>(mlirOp)) {
+    else if (isa<ReduceSumOp, ReduceMaxOp, ReduceMinOp, ReduceProdOp,
+                 HistogramOp, ScanOp>(mlirOp)) {
       if (mlirOp->getNumOperands() > 0) {
         totalFLOPs += getNumElementsFromType(mlirOp->getOperand(0).getType());
       }

@@ -132,6 +132,41 @@ def test_1d_strided_compaction(dtype, in_numel, stride, ncore, xblock, xblock_su
             f"mismatch count = {(actual != ref).sum().item()}"
 
 
+@pytest.mark.skipif(
+    not is_compile_on_910_95(triton.runtime.driver.active.get_current_target().arch),
+    reason="StridedLoadStoreRewrite mask A/B requires an Ascend 910_95/A5 toolchain",
+)
+def test_1d_strided_compaction_rule_mask_ab(monkeypatch):
+    """Compare all rules with the all-minus-P11 pipeline on one V1 shape."""
+    in_numel = 4096 * 4
+    out_numel = 4096
+    stride = 4
+    src = test_common.generate_tensor((in_numel, ), "float32").npu()
+    expected = _ref_1d(src.cpu(), stride, out_numel)
+    outputs = {}
+
+    monkeypatch.setenv("TRITON_ALWAYS_COMPILE", "1")
+    for rule_mask in (4095, 4031):
+        monkeypatch.setenv("TRITON_ASCEND_GRAPH_EXPERIMENT_RULE_MASK", str(rule_mask))
+        kernel_1d_strided_compaction.device_caches.clear()
+        dst = torch.empty(out_numel, dtype=torch.float32, device="npu")
+        kernel_1d_strided_compaction[(2, )](
+            src,
+            dst,
+            in_numel,
+            out_numel,
+            XBLOCK=2048,
+            XBLOCK_SUB=256,
+            STRIDE=stride,
+            enable_graph_optimize=True,
+        )
+        torch.npu.synchronize()
+        outputs[rule_mask] = dst.cpu()
+
+    torch.testing.assert_close(outputs[4095], expected, atol=1e-2, rtol=1e-3)
+    torch.testing.assert_close(outputs[4031], outputs[4095], atol=1e-2, rtol=1e-3)
+
+
 # ---------------------------------------------------------------------------
 # Multi-D: out[i0, i1, ..., in-1] = in_flat[sum_d i_d * STRIDE_d]
 # Output is packed contiguous of shape `blocks`; input is flat with enough

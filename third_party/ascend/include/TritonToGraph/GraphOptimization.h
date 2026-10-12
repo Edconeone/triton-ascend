@@ -23,6 +23,7 @@
 #ifndef TRITON_TO_GRAPH_GRAPH_OPTIMIZATION_H
 #define TRITON_TO_GRAPH_GRAPH_OPTIMIZATION_H
 
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 
@@ -43,10 +44,9 @@ enum class GraphOptimizationRuleId : GraphOptimizationRuleMask {
   LoadStoreTranspose = 1,
   TransposePointwiseReorder = 2,
   StoreCoalescing = 4,
-  // RowCoalescing includes a shared-rhs dot pattern and a pure-SIMT-only
-  // elementwise pattern. It is intentionally
-  // scheduled once after the normal per-function phases because its launch
-  // contract must not be suppressed by their rewrite budget.
+  // RowCoalescing is a pure-SIMT-only graph rule. Its provider contributes to
+  // the same per-function candidate pool as the other TTIR graph rules; the
+  // compile-mode guard prevents it from entering non-SIMT searches.
   RowCoalescing = 8,
   // DiagonalMaskRemoval rewrites compute logic rather than memory access, so
   // it is architecture and template independent.
@@ -54,47 +54,61 @@ enum class GraphOptimizationRuleId : GraphOptimizationRuleMask {
   // ConvertModuloToMask linearizes wrapped tile addresses.  It runs before the
   // memory-access rules so they see the linear form.
   ConvertModuloToMask = 256,
-  // The following identities are owned by the layout/memory compatibility
-  // passes.  They deliberately are not GraphOptimizationRule candidates and
-  // are not added to GraphOptimizePass's per-function phase loop.
+  // Reserved for the NarrowUnsignedTensor Manual-12 baseline while its
+  // semantics are migrated into AutoGraphSolver.
+  NarrowUnsignedTensor = 512,
+  // The following identities run at later IR stages. They share the automatic
+  // solver's control plane, but their candidates can only be analyzed and
+  // materialized after TritonToLinalg has exposed the required layout/memory
+  // facts.
   StridedAxisCoalescing = 16,
   ChunkCoalescing = 32,
   StridedLoadStoreRewrite = 64,
-  IndependentAxisTensorize = 512,
-  PersistentTaskStripMining = 2048,
-  ResidentLoadForwarding = 4096,
-  IntermediatePrecisionBoundaryElision = 8192,
-  StoreCoveragePlanning = 16384,
-  ContiguousBlockAccessFormation = 32768,
-  // SelectedBlockScanRule rewrites the table-indexed sparse gather loop into a
-  // token-order scan, before QueryRowBatchingRule lifts the rows.  Default-off
-  // (opt-in), and it has no landing path of its own: it materialises the row
-  // lift inside its own sandbox and lets that rewrite decide.
-  SelectedBlockScan = 65536,
-  // QueryRowBatchingRule merges R query rows of a table-indexed sparse block
-  // loop into one program so a single K/V tile feeds all of them.  It shares
-  // RowLiftBuilder with RowCoalescing but owns its own matcher, so the two
-  // rules stay independently gated; RFC #2686 places it in the ProgramMapping
-  // phase, alongside IAT.
-  QueryRowBatching = 131072,
+  // Post-TritonToLinalg buffer lifetime/coverage optimization. It shares the
+  // solver rule mask even though its materializer runs on Linalg/MemRef IR.
+  MergeConcatLoadBuffer = 1024,
+  // Enables the generic AutoGraphSolver provider. Individual executable-op
+  // schemas carry their own target/type guards inside the solver language;
+  // this identity is not tied to a source graph pattern.
+  AutoGraphSolver = 2048,
 };
 
-enum class GraphOptimizationRulePhase : uint8_t {
-  DiagonalMaskRemoval,
-  ConvertModuloToMask,
-  SelectedBlockScan,
-  ProgramMapping,
-  PersistentTaskMapping,
-  LoadStoreTranspose,
-  TransposePointwiseReorder,
-  ResidentLoadForwarding,
-  IntermediatePrecisionBoundaryElision,
-  StoreCoveragePlanning,
-  StoreCoalescing,
-  ContiguousBlockAccessFormation,
-  RowCoalescing,
-  Compatibility,
+inline constexpr const char *kGraphOptimizationRuleMaskAttrName =
+    "hacc.auto_graph_solver_rule_mask";
+inline constexpr const char *kAutoGraphRuleDatabaseAttrName =
+    "hacc.auto_graph_solver_rule_database";
+inline constexpr const char *kAutoGraphOnlineBudgetAttrName =
+    "hacc.auto_graph_solver_online_budget_ms";
+inline constexpr const char *kAutoGraphRewriteBudgetAttrName =
+    "hacc.auto_graph_solver_rewrite_budget";
+inline constexpr const char *kAutoGraphTarget91095AttrName =
+    "hacc.auto_graph_solver_target_91095";
+
+// Independently measurable NarrowUnsigned semantic families owned by the
+// automatic solver. The mask exists only for cold-compile experiments and
+// per-family performance attribution.
+enum class NarrowUnsignedRuleId : uint8_t {
+  Select = 1,
+  Bitwise = 2,
+  ShiftRight = 4,
+  CompareEqual = 8,
 };
+
+constexpr uint8_t getNarrowUnsignedRuleMask(NarrowUnsignedRuleId rule) {
+  return static_cast<uint8_t>(rule);
+}
+
+constexpr uint8_t kAllNarrowUnsignedRuleMask =
+    getNarrowUnsignedRuleMask(NarrowUnsignedRuleId::Select) |
+    getNarrowUnsignedRuleMask(NarrowUnsignedRuleId::Bitwise) |
+    getNarrowUnsignedRuleMask(NarrowUnsignedRuleId::ShiftRight) |
+    getNarrowUnsignedRuleMask(NarrowUnsignedRuleId::CompareEqual);
+
+constexpr bool isValidNarrowUnsignedRuleMask(uint8_t ruleMask) {
+  constexpr uint8_t unknownRuleBits =
+      static_cast<uint8_t>(~kAllNarrowUnsignedRuleMask);
+  return (ruleMask & unknownRuleBits) == 0;
+}
 
 constexpr const char *
 getGraphOptimizationRuleName(GraphOptimizationRuleId rule) {
@@ -111,28 +125,18 @@ getGraphOptimizationRuleName(GraphOptimizationRuleId rule) {
     return "DiagonalMaskRemoval";
   case GraphOptimizationRuleId::ConvertModuloToMask:
     return "ConvertModuloToMask";
+  case GraphOptimizationRuleId::NarrowUnsignedTensor:
+    return "NarrowUnsignedTensor";
   case GraphOptimizationRuleId::StridedAxisCoalescing:
     return "StridedAxisCoalescing";
   case GraphOptimizationRuleId::ChunkCoalescing:
     return "ChunkCoalescing";
   case GraphOptimizationRuleId::StridedLoadStoreRewrite:
     return "StridedLoadStoreRewrite";
-  case GraphOptimizationRuleId::IndependentAxisTensorize:
-    return "IndependentAxisTensorizeRule";
-  case GraphOptimizationRuleId::PersistentTaskStripMining:
-    return "PersistentTaskStripMiningRule";
-  case GraphOptimizationRuleId::ResidentLoadForwarding:
-    return "ResidentLoadForwardingRule";
-  case GraphOptimizationRuleId::IntermediatePrecisionBoundaryElision:
-    return "IntermediatePrecisionBoundaryElisionRule";
-  case GraphOptimizationRuleId::StoreCoveragePlanning:
-    return "StoreCoveragePlanningRule";
-  case GraphOptimizationRuleId::ContiguousBlockAccessFormation:
-    return "ContiguousBlockAccessFormationRule";
-  case GraphOptimizationRuleId::SelectedBlockScan:
-    return "SelectedBlockScanRule";
-  case GraphOptimizationRuleId::QueryRowBatching:
-    return "QueryRowBatchingRule";
+  case GraphOptimizationRuleId::MergeConcatLoadBuffer:
+    return "MergeConcatLoadBuffer";
+  case GraphOptimizationRuleId::AutoGraphSolver:
+    return "AutoGraphSolver";
   }
   return "Unknown";
 }
@@ -231,10 +235,15 @@ constexpr GraphOptimizationRuleMask kLegacyGraphOptimizationRuleMask =
     getGraphOptimizationRuleMask(GraphOptimizationRuleId::DiagonalMaskRemoval) |
     getGraphOptimizationRuleMask(GraphOptimizationRuleId::ConvertModuloToMask) |
     getGraphOptimizationRuleMask(
+        GraphOptimizationRuleId::NarrowUnsignedTensor) |
+    getGraphOptimizationRuleMask(
         GraphOptimizationRuleId::StridedAxisCoalescing) |
     getGraphOptimizationRuleMask(GraphOptimizationRuleId::ChunkCoalescing) |
     getGraphOptimizationRuleMask(
-        GraphOptimizationRuleId::StridedLoadStoreRewrite);
+        GraphOptimizationRuleId::StridedLoadStoreRewrite) |
+    getGraphOptimizationRuleMask(
+        GraphOptimizationRuleId::MergeConcatLoadBuffer) |
+    getGraphOptimizationRuleMask(GraphOptimizationRuleId::AutoGraphSolver);
 
 constexpr GraphOptimizationRuleMask kKnownGraphOptimizationRuleMask =
     kLegacyGraphOptimizationRuleMask |
@@ -331,26 +340,30 @@ isValidGraphOptimizationRuleMask(GraphOptimizationRuleMask ruleMask) {
   return (ruleMask & unknownRuleBits) == 0;
 }
 
-struct IndependentAxisTensorizeRuleOptions {
-  bool enabledForCompileMode = true;
-  bool iatAndPtsmEnabled = false;
-};
-struct PersistentTaskStripMiningRuleOptions {
-  bool enabledForCompileMode = true;
-};
-struct StoreCoalescingRuleOptions {
-  bool enabledForCompileMode = true;
-};
-struct ResidentLoadForwardingRuleOptions {};
-struct IntermediatePrecisionBoundaryElisionRuleOptions {};
-struct StoreCoveragePlanningRuleOptions {};
-struct ContiguousBlockAccessFormationRuleOptions {};
+// GraphOptimize records the validated mask on the module so the later
+// TritonToLinalg and Linalg/MemRef solver stages make decisions from the same
+// experiment configuration. A module that did not run GraphOptimize retains
+// the historical all-rules-enabled behavior.
+inline uint16_t getModuleGraphOptimizationRuleMask(ModuleOp moduleOp) {
+  auto maskAttr = moduleOp->getAttrOfType<IntegerAttr>(
+      kGraphOptimizationRuleMaskAttrName);
+  if (!maskAttr)
+    return kAllGraphOptimizationRuleMask;
+  const uint16_t mask = static_cast<uint16_t>(maskAttr.getInt());
+  return isValidGraphOptimizationRuleMask(mask) ? mask : 0;
+}
+
+inline bool isGraphOptimizationRuleEnabled(ModuleOp moduleOp,
+                                           GraphOptimizationRuleId rule) {
+  return (getModuleGraphOptimizationRuleMask(moduleOp) &
+          getGraphOptimizationRuleMask(rule)) != 0;
+}
 
 struct GraphOptimizationOptions {
-  // A zero mask intentionally disables every native GraphOptimizationRule.
-  // Layout/memory compatibility stages retain their original fixed scheduling
-  // and do not use this option as a new opt-out.
-  GraphOptimizationRuleMask enabledRuleMask = kDefaultGraphOptimizationRuleMask;
+  // A zero mask intentionally disables every automatic graph-optimization
+  // stage, including the later layout/memory and buffer materializers.
+  uint16_t enabledRuleMask = kAllGraphOptimizationRuleMask;
+  uint8_t enabledNarrowUnsignedRuleMask = kAllNarrowUnsignedRuleMask;
   unsigned maxRewritesPerFunction = 64;
   unsigned ubCapacityBytes = 0;
   unsigned mappingUBCapacityBytes = 0;
@@ -372,6 +385,17 @@ struct GraphOptimizationOptions {
   // second derived force flag so every consumer follows one mode contract.
   std::string compileMode = "simd_simt_template";
   bool compileOn91095 = false;
+  // Per-function online AGS budget. Zero disables the wall-time gate. Offline
+  // database lookup should use a small finite value in production/CI.
+  unsigned maxAutoGraphOnlineMilliseconds = 0;
+  // Versioned artifact emitted by triton-ags-rulegen. Production AGS performs
+  // canonical lookup only. An empty path leaves AGS disabled instead of
+  // silently moving the offline candidate search into user compilation.
+  std::string autoGraphRuleDatabase;
+  // Test-only compatibility path for the original in-process POC. Production
+  // compilation must resolve a RuleDB and perform lookup only; it must never
+  // turn a missing artifact into an unbounded online candidate search.
+  bool allowOnlineSemanticEnumeration = false;
 };
 
 std::unique_ptr<OperationPass<ModuleOp>>

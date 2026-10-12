@@ -74,9 +74,11 @@ def GraphOptimize : Pass<"graph-optimize", "mlir::ModuleOp"> {
   let constructor = "mlir::triton::cfg::createGraphOptimizePass()";
   let options = [
     Option<"compileOn91095", "compile-on-910-95", "bool", "false",
-           "Enable histogram rewrites relying on Ascend 910_95 templates">,
-    Option<"ruleMask", "rule-mask", "uint64_t", "511",
-           "Bitmask of registered graph rule identities; this pass executes only native graph-rule phases">,
+           "Enable AutoGraphSolver candidates requiring Ascend 910_95 capabilities">,
+    Option<"ruleMask", "rule-mask", "uint64_t", "4095",
+           "Bitmask shared by TTIR, layout/memory, and buffer graph-optimization stages">,
+    Option<"narrowUnsignedRuleMask", "narrow-unsigned-rule-mask", "uint64_t", "15",
+           "AutoGraphSolver experiment mask for Select=1, Bitwise=2, ShiftRight=4, CompareEqual=8">,
     Option<"maxRewritesPerFunction", "max-rewrites-per-function", "uint64_t",
            "64", "Maximum graph rewrites per function">,
     Option<"ubCapacityBytes", "ub-capacity-bytes", "uint64_t", "0",
@@ -100,7 +102,15 @@ def GraphOptimize : Pass<"graph-optimize", "mlir::ModuleOp"> {
     Option<"coreNum", "core-num", "uint64_t", "0",
            "Physical AI-core blocks the launcher schedules (AIV for pure-SIMT kernels, AIC otherwise); zero disables the gridX/R >= coreNum row-count constraint">,
     Option<"compileMode", "compile-mode", "std::string", "\"simd_simt_template\"",
-           "Compilation mode; legacy elementwise RowCoalescing is enabled only for simt_only">,
+           "Compilation mode; RowCoalescing is enabled only for simt_only">,
+    Option<"autoGraphRuleDatabase", "auto-graph-rule-database", "std::string",
+           "\"\"", "Versioned .agsdb used by the online AutoGraphSolver lookup path; comma-separated compatible shards are merged deterministically">,
+    Option<"allowOnlineSemanticEnumeration", "allow-online-semantic-enumeration",
+           "bool", "false",
+           "Test-only: permit the original in-process semantic candidate search when no RuleDB is supplied">,
+    Option<"maxAutoGraphOnlineMilliseconds", "max-auto-graph-online-ms",
+           "uint64_t", "0",
+           "Fail when one function's AutoGraphSolver lookup exceeds this wall-time budget">,
   ];
 }
 

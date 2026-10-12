@@ -24,6 +24,7 @@ import functools
 import hashlib
 import glob
 import json
+import operator
 import os
 import re
 import shlex
@@ -87,6 +88,117 @@ from triton.backends.compiler import (
 from triton.runtime.cache import get_dump_manager
 
 
+def _infer_launch_grid_bound_contracts(grid, bound_args, specialization):
+    """Return unambiguous ``(grid_axis, TTIR_argument)`` equalities.
+
+    This is a per-launch observation, not a guess about the Python source.
+    JIT includes the returned tuple in its cache key and recomputes it before
+    every launch.  A relation is omitted when two integer arguments have the
+    same value, because their identity would otherwise be ambiguous.
+    """
+    integer_arguments = []
+    ttir_argument = 0
+    for value, specialized in zip(bound_args.values(), specialization):
+        type_name = specialized[0] if specialized else ""
+        if type_name == "constexpr":
+            continue
+        current_argument = ttir_argument
+        ttir_argument += 1
+        if not isinstance(type_name, str) or len(type_name) < 2:
+            continue
+        if type_name[0] not in ("i", "u") or not type_name[1:].isdigit():
+            continue
+        if isinstance(value, bool):
+            continue
+        try:
+            integer_arguments.append((current_argument, operator.index(value)))
+        except TypeError:
+            continue
+
+    contracts = []
+    for axis, extent in enumerate(grid):
+        if isinstance(extent, bool):
+            continue
+        try:
+            extent = operator.index(extent)
+        except TypeError:
+            continue
+        if extent <= 0:
+            continue
+        matches = [argument for argument, value in integer_arguments if value == extent]
+        if len(matches) == 1:
+            contracts.append((axis, matches[0]))
+    return tuple(contracts)
+
+
+def _normalize_launch_grid_bound_contracts(contracts):
+    normalized = []
+    for contract in contracts or ():
+        if not isinstance(contract, (list, tuple)) or len(contract) != 2:
+            raise ValueError("launch grid bound contracts must be (axis, argument) pairs")
+        axis, argument = contract
+        if (isinstance(axis, bool) or isinstance(argument, bool) or
+                not isinstance(axis, int) or not isinstance(argument, int) or
+                axis < 0 or axis > 2 or argument < 0):
+            raise ValueError("invalid launch grid bound contract")
+        normalized.append((axis, argument))
+    if len({axis for axis, _ in normalized}) != len(normalized):
+        raise ValueError("launch grid bound contracts contain a duplicate axis")
+    return tuple(sorted(normalized))
+
+
+def _inject_launch_grid_bound_contracts(mod, contracts, target_arch):
+    if not contracts:
+        return
+    axes = ", ".join(str(axis) for axis, _ in contracts)
+    arguments = ", ".join(str(argument) for _, argument in contracts)
+    builder = ascend.ir.ascendnpu_ir_builder(mod.context, target_arch)
+    axes_attr = builder.parse_attr(f"array<i32: {axes}>")
+    arguments_attr = builder.parse_attr(f"array<i32: {arguments}>")
+
+    def annotate(operation):
+        if operation.get_name() != "tt.func":
+            return
+        visibility = operation.get_str_attr("sym_visibility")
+        if visibility and visibility != "public":
+            return
+        operation.set_attr("ags.launch_grid_bound_axes", axes_attr)
+        operation.set_attr("ags.launch_grid_bound_arguments", arguments_attr)
+
+    mod.walk(annotate)
+
+
+def _resolve_auto_graph_rule_database(requested):
+    """Resolve the online RuleDB without requiring a launch-time option.
+
+    An explicit compiler option wins.  Development and clean-test jobs may
+    point at an immutable offline artifact through
+    ``TRITON_ASCEND_AUTO_GRAPH_RULE_DATABASE``; release tooling may instead
+    package ``auto_graph_rules.agsdb`` next to this backend module.  Every
+    selected path is validated here and content-hashed into the cache key by
+    ``NPUOptions``.
+    """
+    configured = requested or os.getenv(
+        "TRITON_ASCEND_AUTO_GRAPH_RULE_DATABASE", "")
+    if configured:
+        path = Path(configured).expanduser().resolve()
+        if not path.is_file():
+            raise ValueError(f"AutoGraphSolver rule database does not exist: {path}")
+        return str(path)
+    packaged = Path(__file__).with_name("auto_graph_rules.agsdb")
+    return str(packaged.resolve()) if packaged.is_file() else ""
+
+
+def _hash_auto_graph_rule_database(path):
+    if not path:
+        return ""
+    digest = hashlib.sha256()
+    with open(path, "rb") as database:
+        for block in iter(lambda: database.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 # TODO: materialize the concrete min shape
 def min_dot_size(target: GPUTarget):
     return lambda lhsType, rhsType: (1, 1, 1)
@@ -145,6 +257,10 @@ def _export_coalesce_metadata(mod, metadata, *, require_row_contract=False):
     # A Row result is only valid as the complete triple.  The regular T2L
     # Axis/Chunk ABI predates ceil-div and deliberately remains compatible with
     # a missing ceil-div attr.
+    # The unified solver mask is consumed by the final Linalg/MemRef graph
+    # stage. It is compiler-control state, not target metadata, and hivmc
+    # rejects unknown hacc module attributes.
+    _get_then_remove_rc(mod, "hacc.auto_graph_solver_rule_mask")
     factor = _get_then_remove_rc(mod, "hacc.coalesce_factor")
     axis = _get_then_remove_rc(mod, "hacc.coalesce_axis")
     ceil_div = _get_then_remove_rc(mod, "hacc.coalesce_grid_ceil_div")
@@ -348,6 +464,12 @@ def make_tla_ttir(mod, metadata, opt):
 def make_ttir(mod, metadata, opt):
     if "hash" not in metadata:
         metadata["hash"] = hashlib.sha256(f"{mod}-{metadata}".encode()).hexdigest()
+    rule_database = getattr(opt, "auto_graph_rule_database", "")
+    if (rule_database and
+            _hash_auto_graph_rule_database(rule_database) !=
+            getattr(opt, "auto_graph_rule_database_hash", "")):
+        raise RuntimeError(
+            "AutoGraphSolver rule database changed after cache-key creation")
     # the same optimize pass for triton-ir as all other backends
     pm = ir.pass_manager(mod.context)
     pm.enable_debug()
@@ -361,13 +483,33 @@ def make_ttir(mod, metadata, opt):
     passes.common.add_licm(pm)
     passes.common.add_symbol_dce(pm)
     passes.ttir.add_loop_unroll(pm)
+    _inject_launch_grid_bound_contracts(
+        mod, getattr(opt, "launch_grid_bound_contracts", ()),
+        opt.target_arch)
     if opt.enable_graph_optimize:
-        ascend.passes.ttir.add_graph_optimize(
-            pm,
-            ub_capacity_bytes=graph_ub_budget_bytes_for_arch(opt.target_arch),
-            compile_mode=opt.compile_mode,
-            compile_on_910_95=opt.compile_on_910_95,
-        )
+        rule_mask = _get_graph_experiment_mask(
+            "TRITON_ASCEND_GRAPH_EXPERIMENT_RULE_MASK", 4095, 4095)
+        narrow_unsigned_rule_mask = _get_graph_experiment_mask(
+            "TRITON_ASCEND_GRAPH_EXPERIMENT_NARROW_UNSIGNED_MASK", 15, 15)
+    else:
+        # The pass also publishes the unified rule mask for the later
+        # TritonToLinalg and Linalg/MemRef solver stages. Keep the pass in the
+        # pipeline with an empty mask so enable_graph_optimize=False is a true
+        # all-stage off baseline rather than only disabling early TTIR rules.
+        rule_mask = 0
+        narrow_unsigned_rule_mask = 0
+    graph_options = {
+        "rule_mask": rule_mask,
+        "narrow_unsigned_rule_mask": narrow_unsigned_rule_mask,
+        "ub_capacity_bytes": graph_ub_budget_bytes_for_arch(opt.target_arch),
+        "compile_mode": opt.compile_mode,
+        "compile_on_910_95": opt.compile_on_910_95,
+        "max_auto_graph_online_ms": getattr(
+            opt, "max_auto_graph_online_ms", 0),
+    }
+    if rule_database:
+        graph_options["auto_graph_rule_database"] = rule_database
+    ascend.passes.ttir.add_graph_optimize(pm, **graph_options)
     pm.run(mod, 'make_ttir')
     if opt.debug:
         dump_manager = get_dump_manager(metadata["hash"])
@@ -377,27 +519,29 @@ def make_ttir(mod, metadata, opt):
     return mod
 
 
-def _export_profile_metadata(mod, metadata):
-    metadata["profile_scratch_size"] = 0
-    metadata["profile_scratch_align"] = 1
-    if AscendBackend.instrumentation:
-        metadata.update(ascend.ir.get_kernel_profile_metadata(mod))
+def _get_graph_experiment_mask(name, default, maximum):
+    """Read a cold-compile-only graph experiment mask.
+
+    These environment variables are intentionally not public compile options.
+    They let clean-test isolate an optimization family without editing a test
+    or changing the production default. Requiring TRITON_ALWAYS_COMPILE keeps
+    the ordinary options cache key from aliasing two experimental pipelines.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    if os.environ.get("TRITON_ALWAYS_COMPILE") != "1":
+        raise RuntimeError(f"{name} requires TRITON_ALWAYS_COMPILE=1")
+    try:
+        value = int(raw, 0)
+    except ValueError as error:
+        raise ValueError(f"{name} must be an integer mask") from error
+    if value < 0 or value > maximum:
+        raise ValueError(f"{name} must be between 0 and {maximum}")
+    return value
 
 
-def tla_to_ttadapter(mod, metadata, opt):
-    from triton.language.extra.tla.compiler import lower_ttir
-
-    metadata["has_auto_blockify_blacklist_op"] = False
-    lower_ttir(mod, mod.context)
-    _export_profile_metadata(mod, metadata)
-    _export_program_grid_metadata(mod, metadata)
-    text = _serialize_module(mod, opt)
-    if opt.debug:
-        get_dump_manager(metadata["hash"]).put(text, "kernel.ttadapter.mlir", binary=False)
-    return text
-
-
-def ttir_to_linalg(mod, metadata, opt, *, named_ops=True):
+def ttir_to_linalg(mod, metadata, opt, *, named_ops=False):
     # use triton_adapter to lower Triton-MLIR to linalg
     # Get Triton-MLIR as string
     ttir_code = _serialize_module(mod, opt)
@@ -1311,7 +1455,10 @@ class NPUOptions:
     deprecated_fp8_dot_operand_dtypes: Tuple[str] = ()
     vf_merge_level: int = 1
     default_dot_input_precision: str = "ieee"
-    allowed_dot_input_precisions: Tuple[str] = ("ieee", "hf32")
+    # Keep the public Triton precision vocabulary.  AscendSemantic maps the
+    # user-facing hf32 spelling to TF32 before the common IR builder runs;
+    # Ascend lowering then emits the backend-specific hf32 attribute.
+    allowed_dot_input_precisions: Tuple[str] = ("ieee", "tf32")
     max_num_imprecise_acc_default: int = 0
     extern_libs: dict = None
     # Backend-managed BiSheng arguments. Keep the name discoverable so legacy
@@ -1386,76 +1533,25 @@ class NPUOptions:
     # unmasked kernels whose grid dims are compile-time known.
     grid_num_tiles: int = None
 
-    # Deprecated names remain visible to callers that use parse_options({})
-    # to distinguish compile options from kernel arguments. Their public
-    # values are ignored (or routed to canonical options) before construction.
-    add_auto_scheduling: bool = field(default=False, init=False)
-    allow_fp8e4nv: bool = field(default=False, init=False)
-    auto_blockify_size: int = field(default=1, init=False)
-    auto_tile_and_bind_subblock: bool = field(default=True, init=False)
-    code_motion: Optional[bool] = field(default=None, init=False)
-    enable_auto_blockify: Optional[bool] = field(default=None, init=False)
-    enable_bishengir_simt_optimization: int = field(default=0, init=False)
-    enable_buffer_insert_optimization: bool = field(default=True, init=False)
-    enable_cce_vf_auto_sync: Optional[bool] = field(default=None, init=False)
-    enable_cce_vf_remove_membar: Optional[bool] = field(default=None, init=False)
-    enable_cross_if_fusion: bool = field(default=False, init=False)
-    enable_drop_unit_dims: Optional[bool] = field(default=None, init=False)
-    enable_linearize: Optional[bool] = field(default=None, init=False)
-    enable_mask_fallback_conversion: bool = field(default=False, init=False)
-    enable_nd2nz_on_vector: bool = field(default=False, init=False)
-    enable_select_analysis: bool = field(default=True, init=False)
-    enable_simt_reorder_instruction: bool = field(default=False, init=False)
-    enable_sync_block_lock: Optional[bool] = field(default=None, init=False)
-    enable_ub_refine_opt: bool = field(default=False, init=False)
-    enable_vf_fusion: Optional[bool] = field(default=None, init=False)
-    force_simt_only: bool = field(default=False, init=False)
-    force_simt_template: bool = field(default=False, init=False)
-    graph_optimize_emit_remarks: bool = field(default=False, init=False)
-    graph_optimize_max_rewrites_per_function: int = field(default=64, init=False)
-    graph_optimize_rule_mask: int = field(default=DEFAULT_GRAPH_OPTIMIZATION_RULE_MASK, init=False)
-    graph_optimize_ub_capacity_bytes: Optional[int] = field(default=None, init=False)
-    has_auto_blockify_blacklist_op: Optional[bool] = field(default=None, init=False)
-    inter_cache_num: Optional[int] = field(default=None, init=False)
-    intra_cache_num: Optional[int] = field(default=None, init=False)
-    kernel_name: str = field(default="triton_", init=False)
-    llvm_version: int = field(default=15, init=False)
-    load_cache_num: Optional[int] = field(default=None, init=False)
-    mix_mode: str = field(default="", init=False)
-    ops_reorder: Optional[bool] = field(default=None, init=False)
-    optimize_dynamic_offset: bool = field(default=False, init=False)
-    simt_reorder_instruction: bool = field(default=False, init=False)
-    storage_align: Optional[bool] = field(default=None, init=False)
-    stream: Optional[int] = field(default=None, init=False)
-    use_bytecode: bool = field(default=False, init=False)
+    # Compiler-derived per-launch contracts.  This is populated by
+    # AscendBackend.specialize_options_for_launch, participates in the cache
+    # hash, and is injected as TTIR function metadata before graph optimize.
+    launch_grid_bound_contracts: tuple = field(default=(), init=False, repr=False)
 
-    def __post_init__(self, arch, rule_mask):
-        from triton.backends.ascend import _apply_ascend_patch
+    # The release build may package the offline-generated database next to
+    # compiler.py.  Its content hash, rather than only its path, participates
+    # in the compiler cache key so replacing a database cannot reuse stale IR.
+    auto_graph_rule_database: str = None
+    auto_graph_rule_database_hash: str = field(default="", init=False, repr=False)
 
-        if self.ir_override and self.ir_override.endswith((".mlirbc", ".bcmlir")):
-            raise ValueError(
-                "The .mlirbc and .bcmlir stages have been removed; use BishengIR text with the .ttadapter extension")
-        _apply_ascend_patch()
+    def __post_init__(self, arch):
         object.__setattr__(self, "target_arch", arch)
-        if arch:
-            object.__setattr__(
-                self,
-                "bisheng_options",
-                "-cce-link-aicore-ll-module " + get_libdevice(arch),
-            )
-        # Plain init=False defaults live on the class. Materialize them in
-        # the instance because both Inductor and JIT inspect options.__dict__.
-        for name, option_field in self.__dataclass_fields__.items():
-            if not option_field.init and name not in self.__dict__:
-                object.__setattr__(self, name, option_field.default)
-        # Keep the legacy name discoverable while its property and all
-        # compiler decisions continue to use the injected target architecture.
-        self.__dict__["arch"] = arch
-        object.__setattr__(self, "multibuffer_mode", _multibuffer_mode_to_tuple(self.multibuffer_mode))
-        if self.multibuffer_mode is not None and self.num_stages is not None:
-            raise ValueError("num_stages and multibuffer_mode cannot be specified together")
-        if self.multibuffer_mode is None and self.num_stages is None:
-            object.__setattr__(self, "num_stages", 2)
+        object.__setattr__(self, "launch_grid_bound_contracts", ())
+        rule_database = _resolve_auto_graph_rule_database(
+            self.auto_graph_rule_database)
+        object.__setattr__(self, "auto_graph_rule_database", rule_database)
+        object.__setattr__(self, "auto_graph_rule_database_hash",
+                           _hash_auto_graph_rule_database(rule_database))
         if self.compile_on_910_95 is not None:
             _warn_deprecated_npu_option("compile_on_910_95")
         object.__setattr__(
@@ -1686,14 +1782,13 @@ class AscendBackend(BaseBackend):
                 raise ValueError(f"unsupported Ascend frontend kind: {frontend_kind!r}")
             args = {k: normalized_opts[k] for k in option_names if k in normalized_opts}
             options = NPUOptions(arch=self.target.arch, **args)
-            # Frontend identity comes from the source.
-            # A launch keyword alone cannot select TLA.
-            object.__setattr__(options, "enable_tla_mode", frontend_kind == "tla")
-            # DynamicCV is A5-only. A6 remains register-based but must not
-            # enter the DynamicCV lowering or pass its compiler flags.
-            if not _is_a5_target_arch(self.target.arch):
-                object.__setattr__(options, "enable_dynamic_cv_pipeline", False)
-            elif options.enable_dynamic_cv_pipeline is None:
+            object.__setattr__(
+                options, "launch_grid_bound_contracts",
+                _normalize_launch_grid_bound_contracts(
+                    normalized_opts.get("launch_grid_bound_contracts", ())))
+            # Lazy init enable_dynamic_cv_pipeline if not provided.
+            # compile_on_910_95 is already resolved from the requested target.
+            if options.enable_dynamic_cv_pipeline is None:
                 object.__setattr__(options, "enable_dynamic_cv_pipeline", options.compile_on_910_95)
             if not internal_options:
                 _normalize_bishengir_simt_optimization_for_context(options, normalized_opts)
@@ -1706,6 +1801,12 @@ class AscendBackend(BaseBackend):
             raise NotImplementedError(f"Backend '{self.target.backend}' is not supported. "
                                       "Please ensure the target backend is set to 'npu'.")
         return options
+
+    def specialize_options_for_launch(self, grid, bound_args, specialization, options):
+        specialized = dict(options)
+        specialized["launch_grid_bound_contracts"] = (
+            _infer_launch_grid_bound_contracts(grid, bound_args, specialization))
+        return specialized
 
     def pack_metadata(self, metadata):
         # collect necessary metadata to launch kernels
@@ -1734,6 +1835,41 @@ class AscendBackend(BaseBackend):
         #       e.g. convert custom types like fp8e4b15
         codegen_fns = {"min_dot_size": min_dot_size(self.target)}
         return codegen_fns
+
+    def get_codegen_hooks(self, options):
+        from .codegen import AscendCodegenHooks
+        return AscendCodegenHooks()
+
+    def load_binary(self, runtime_utils, metadata, kernel, device):
+        return runtime_utils.load_binary(
+            metadata.kernel_name, kernel, metadata.shared, device, metadata.mix_mode)
+
+    def get_compile_stage_name(self, ext: str) -> str:
+        return {
+            "ttadapter": "ConvertTritonIRToLinalgIR",
+            "npubin": "ConvertLinalgIRToBinary",
+            "bcmlir": "BytecodeToLinalgIRByBishengirOpt",
+            "mlirbc": "LinalgIRToBytecodeByTritonMLIROpt",
+        }.get(ext, "MLIRCompile")
+
+    def parse_override(self, full_name, ext, context):
+        if ext in ("ttadapter", "bcmlir"):
+            return Path(full_name).read_text()
+        if ext in ("mlirbc", "npubin"):
+            return Path(full_name).read_bytes()
+        return None
+
+    def get_interpreter_builder(self):
+        from .ascend_interpreter import AscendInterpreterBuilder
+        return AscendInterpreterBuilder
+
+    def get_interpreter_semantic(self, builder):
+        from .semantic import AscendSemantic
+        return AscendSemantic(builder)
+
+    def prepare_ir(self, module):
+        builder = ascend_ir.ascendnpu_ir_builder(module.context, self.target.arch)
+        module.set_attr("tt.allow_non_power_of_two", builder.get_unit_attr())
 
     def load_dialects(self, ctx):
         from triton._C.libtriton import buffer_ir

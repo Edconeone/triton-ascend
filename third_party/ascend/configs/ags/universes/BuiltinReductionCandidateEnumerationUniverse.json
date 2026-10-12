@@ -1,0 +1,57 @@
+{
+  "schema_version": 2,
+  "name": "reduction-candidate-closure-v1",
+  "target": "ascend950dt",
+  "bounds": {
+    "max_nodes": 2,
+    "max_rank": 2,
+    "max_operands": 3,
+    "max_results": 1,
+    "max_shape_symbols": 0,
+    "allow_dynamic_shapes": false,
+    "allow_control_flow": true,
+    "allow_effects": false
+  },
+  "catalog_dialects": ["arith", "tt"],
+  "operations": [
+    "ags.input",
+    "arith.addi",
+    "arith.cmpi",
+    "arith.constant",
+    "arith.extui",
+    "arith.select",
+    "arith.subi",
+    "arith.xori",
+    "tt.broadcast",
+    "tt.expand_dims",
+    "tt.histogram",
+    "tt.make_range",
+    "tt.reduce",
+    "tt.scan",
+    "tt.splat"
+  ],
+  "integer_bits": [1, 32],
+  "floating_bits": [],
+  "pointer_address_spaces": [],
+  "integer_constants": [-1, 0, 1, 2, 7, 16],
+  "tensor_shapes": [[1, 16], [16], [16, 1], [16, 16], [64]],
+  "attribute_domains": {
+    "axis": [0, 1],
+    "cmpi_predicate": [0, 2],
+    "range_end": [16],
+    "range_start": [0],
+    "reverse": [false, true]
+  },
+  "semantic_domains": [
+    "signature",
+    "shape",
+    "index",
+    "layout",
+    "value",
+    "definedness",
+    "effect",
+    "memory"
+  ]
+}
+
+

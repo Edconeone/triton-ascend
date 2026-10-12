@@ -193,12 +193,16 @@ class AscendInterpreterBuilder(InterpreterBuilder):
 
     def __init__(self) -> None:
         super().__init__()
+        self.options.allowed_dot_input_precisions = ("tf32", "tf32x3", "ieee")
         # Sub-vector core ID for simulating 1:2 hardware ratio
         self.sub_vec_id = 0
         # Flag to track if sub_vec_id simulation is needed
         self._sub_vec_simulation_enabled = False
         # Alias so semantic.py can access builder._ascend_builder.create_*
         self._ascend_builder = self
+
+    def create_auto_overflow_assert(self, condition, message):
+        self.create_assert(condition, message)
 
     def to_int_val(self, val):
         """

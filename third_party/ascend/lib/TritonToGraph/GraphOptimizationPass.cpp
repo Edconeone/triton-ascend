@@ -20,8 +20,6 @@
  * THE SOFTWARE.
  */
 
-#include "Rules/FoldHistogramParking.h"
-#include "Rules/NarrowUnsignedTensor.h"
 #include "TritonToGraph/GraphOptimizationContext.h"
 #include "TritonToGraph/GraphOptimizationRule.h"
 #include "TritonToGraph/Passes.h"
@@ -29,17 +27,16 @@
 #include "TritonToGraph/ResourceCostModel.h"
 #include "Utils/Utils.h"
 
-#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "Dialect/TritonAscend/IR/TritonAscendDialect.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
-#include "mlir/IR/PatternMatch.h"
-#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/ADT/StringRef.h"
 
 #include <algorithm>
-#include <array>
 #include <limits>
 #include <memory>
 #include <utility>
@@ -60,22 +57,30 @@ namespace triton {
 namespace cfg {
 namespace {
 
-constexpr std::array<GraphOptimizationRulePhase, 12> kRulePhases = {
-    GraphOptimizationRulePhase::DiagonalMaskRemoval,
-    GraphOptimizationRulePhase::ConvertModuloToMask,
-    GraphOptimizationRulePhase::SelectedBlockScan,
-    GraphOptimizationRulePhase::ProgramMapping,
-    GraphOptimizationRulePhase::PersistentTaskMapping,
-    GraphOptimizationRulePhase::LoadStoreTranspose,
-    GraphOptimizationRulePhase::TransposePointwiseReorder,
-    GraphOptimizationRulePhase::ResidentLoadForwarding,
-    GraphOptimizationRulePhase::IntermediatePrecisionBoundaryElision,
-    GraphOptimizationRulePhase::StoreCoveragePlanning,
-    GraphOptimizationRulePhase::StoreCoalescing,
-    GraphOptimizationRulePhase::ContiguousBlockAccessFormation,
-};
-
 using ProgramOrderMap = llvm::DenseMap<Operation *, unsigned>;
+
+// AscendSemantic emits this private prefix through the common create_assert
+// API.  Materializing the AGS provenance attribute here keeps the marker and
+// all of its interpretation inside the Ascend backend.
+constexpr llvm::StringLiteral kAutoOverflowAssertPrefix =
+    "__triton_ascend_auto_overflow__: ";
+
+void materializeAutoOverflowAssertMarkers(ModuleOp module) {
+  MLIRContext *context = module.getContext();
+  module.walk([&](triton::AssertOp assertOp) {
+    auto message = dyn_cast<StringAttr>(assertOp.getMessageAttr());
+    if (!message || !message.getValue().starts_with(kAutoOverflowAssertPrefix))
+      return;
+
+    assertOp->setAttr("tt.auto_overflow_assert",
+                      UnitAttr::get(context));
+    assertOp->setAttr(
+        "message",
+        StringAttr::get(context,
+                        message.getValue().drop_front(
+                            kAutoOverflowAssertPrefix.size())));
+  });
+}
 
 ProgramOrderMap buildProgramOrderMap(triton::FuncOp function) {
   ProgramOrderMap programOrder;
@@ -148,6 +153,7 @@ public:
 
   explicit GraphOptimizePass(const GraphOptimizationOptions &options) {
     this->ruleMask = options.enabledRuleMask;
+    this->narrowUnsignedRuleMask = options.enabledNarrowUnsignedRuleMask;
     this->maxRewritesPerFunction = options.maxRewritesPerFunction;
     this->ubCapacityBytes = options.ubCapacityBytes;
     this->mappingUBCapacityBytes = options.mappingUBCapacityBytes;
@@ -161,11 +167,17 @@ public:
     this->coreNum = options.coreNum;
     this->compileMode = options.compileMode;
     this->compileOn91095 = options.compileOn91095;
+    this->maxAutoGraphOnlineMilliseconds =
+        options.maxAutoGraphOnlineMilliseconds;
+    this->autoGraphRuleDatabase = options.autoGraphRuleDatabase;
+    this->allowOnlineSemanticEnumeration =
+        options.allowOnlineSemanticEnumeration;
   }
 
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<tensor::TensorDialect, arith::ArithDialect,
-                    triton::TritonDialect>();
+                    triton::TritonDialect,
+                    triton::ascend::TritonAscendDialect>();
   }
 
   void runOnOperation() override;
@@ -188,18 +200,11 @@ LogicalResult GraphOptimizePass::runStructuralCleanup() {
 LogicalResult
 GraphOptimizePass::getStableOptions(GraphOptimizationOptions &options) {
   const uint64_t cliRuleMask = this->ruleMask;
+  const uint64_t cliNarrowUnsignedRuleMask = this->narrowUnsignedRuleMask;
   const uint64_t cliMaxRewrites = this->maxRewritesPerFunction;
   const uint64_t cliUBCapacityBytes = this->ubCapacityBytes;
-  const uint64_t cliMappingUBCapacityBytes = this->mappingUBCapacityBytes;
-  const uint64_t cliStoreCoalescingUBBudgetBytes =
-      this->storeCoalescingUBBudgetBytes;
-  const uint64_t cliUBSafetyPercent = this->ubSafetyPercent;
-  const uint64_t cliReservedUBBytes = this->reservedUBBytes;
-  const uint64_t cliMappingL0ACapacityBytes = this->mappingL0ACapacityBytes;
-  const uint64_t cliMappingL0BCapacityBytes = this->mappingL0BCapacityBytes;
-  const uint64_t cliMappingL0CCapacityBytes = this->mappingL0CCapacityBytes;
-  const uint64_t cliL0SafetyPercent = this->l0SafetyPercent;
-  const uint64_t cliCoreNum = this->coreNum;
+  const uint64_t cliMaxAutoGraphOnlineMilliseconds =
+      this->maxAutoGraphOnlineMilliseconds;
 
   if (cliRuleMask > std::numeric_limits<GraphOptimizationRuleMask>::max() ||
       !isValidGraphOptimizationRuleMask(
@@ -217,6 +222,16 @@ GraphOptimizePass::getStableOptions(GraphOptimizationOptions &options) {
     return failure();
   }
 
+  if (cliNarrowUnsignedRuleMask > std::numeric_limits<uint8_t>::max() ||
+      !isValidNarrowUnsignedRuleMask(
+          static_cast<uint8_t>(cliNarrowUnsignedRuleMask))) {
+    getOperation().emitError()
+        << "graph-optimize narrow-unsigned-rule-mask contains unknown or "
+           "out-of-range bits: "
+        << cliNarrowUnsignedRuleMask;
+    return failure();
+  }
+
   if (cliUBCapacityBytes > std::numeric_limits<unsigned>::max()) {
     getOperation().emitError()
         << "graph-optimize ub-capacity-bytes is out of range: "
@@ -224,57 +239,23 @@ GraphOptimizePass::getStableOptions(GraphOptimizationOptions &options) {
     return failure();
   }
 
-  if (cliMappingUBCapacityBytes > std::numeric_limits<unsigned>::max() ||
-      cliStoreCoalescingUBBudgetBytes > std::numeric_limits<unsigned>::max()) {
+  if (cliMaxAutoGraphOnlineMilliseconds >
+      std::numeric_limits<unsigned>::max()) {
     getOperation().emitError()
-        << "graph-optimize explicit UB budget is out of range: mapping="
-        << cliMappingUBCapacityBytes
-        << " store-coalescing=" << cliStoreCoalescingUBBudgetBytes;
+        << "graph-optimize max-auto-graph-online-ms is out of range: "
+        << cliMaxAutoGraphOnlineMilliseconds;
     return failure();
   }
 
-  const uint64_t effectiveMappingUBCapacity = cliMappingUBCapacityBytes != 0
-                                                  ? cliMappingUBCapacityBytes
-                                                  : cliUBCapacityBytes;
-  const uint64_t effectiveStoreCoalescingUBBudget =
-      cliStoreCoalescingUBBudgetBytes != 0 ? cliStoreCoalescingUBBudgetBytes
-                                           : cliUBCapacityBytes;
-
-  if (cliUBSafetyPercent == 0 || cliUBSafetyPercent > 100 ||
-      cliReservedUBBytes > std::numeric_limits<unsigned>::max() ||
-      cliReservedUBBytes > effectiveMappingUBCapacity) {
-    getOperation().emitError()
-        << "graph-optimize resource options are invalid: ub-safety-percent="
-        << cliUBSafetyPercent << " reserved-ub-bytes=" << cliReservedUBBytes;
-    return failure();
-  }
-
-  if (cliMappingL0ACapacityBytes > std::numeric_limits<unsigned>::max() ||
-      cliMappingL0BCapacityBytes > std::numeric_limits<unsigned>::max() ||
-      cliMappingL0CCapacityBytes > std::numeric_limits<unsigned>::max() ||
-      cliL0SafetyPercent == 0 || cliL0SafetyPercent > 100) {
-    getOperation().emitError()
-        << "graph-optimize cube resource options are invalid: l0a="
-        << cliMappingL0ACapacityBytes << " l0b=" << cliMappingL0BCapacityBytes
-        << " l0c=" << cliMappingL0CCapacityBytes
-        << " l0-safety-percent=" << cliL0SafetyPercent;
-    return failure();
-  }
-
-  if (cliCoreNum > std::numeric_limits<unsigned>::max()) {
-    getOperation().emitError()
-        << "graph-optimize core-num is out of range: " << cliCoreNum;
-    return failure();
-  }
-
-  const auto compileMode = triton::ascend::parseCompileMode(this->compileMode);
-  if (!compileMode) {
+  if (!triton::ascend::parseCompileMode(this->compileMode)) {
     getOperation().emitError()
         << "graph-optimize compile-mode is invalid: " << this->compileMode;
     return failure();
   }
 
-  options.enabledRuleMask = static_cast<GraphOptimizationRuleMask>(cliRuleMask);
+  options.enabledRuleMask = static_cast<uint16_t>(cliRuleMask);
+  options.enabledNarrowUnsignedRuleMask =
+      static_cast<uint8_t>(cliNarrowUnsignedRuleMask);
   options.maxRewritesPerFunction = static_cast<unsigned>(cliMaxRewrites);
   options.ubCapacityBytes =
       static_cast<unsigned>(effectiveStoreCoalescingUBBudget);
@@ -294,6 +275,11 @@ GraphOptimizePass::getStableOptions(GraphOptimizationOptions &options) {
   options.coreNum = static_cast<unsigned>(cliCoreNum);
   options.compileMode = this->compileMode;
   options.compileOn91095 = this->compileOn91095;
+  options.maxAutoGraphOnlineMilliseconds =
+      static_cast<unsigned>(cliMaxAutoGraphOnlineMilliseconds);
+  options.autoGraphRuleDatabase = this->autoGraphRuleDatabase;
+  options.allowOnlineSemanticEnumeration =
+      this->allowOnlineSemanticEnumeration;
   return success();
 }
 
@@ -304,44 +290,35 @@ void GraphOptimizePass::runOnOperation() {
     return;
   }
 
-  // Simplify tensor values before constructing any graph analyses so layout
-  // rules observe the reduced workload, without retaining stale graph state.
-  RewritePatternSet patterns(&getContext());
-  patterns.add<narrow_unsigned_tensor::Narrow>(&getContext());
-  if (compileOn91095)
-    patterns.add<FoldHistogramParking>(&getContext());
-  if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
-    signalPassFailure();
-    return;
-  }
+  ModuleOp module = getOperation();
+  module->setAttr(
+      kGraphOptimizationRuleMaskAttrName,
+      IntegerAttr::get(IntegerType::get(module.getContext(), 16),
+                       options.enabledRuleMask));
+  Builder moduleBuilder(module.getContext());
+  if (!options.autoGraphRuleDatabase.empty())
+    module->setAttr(kAutoGraphRuleDatabaseAttrName,
+                    moduleBuilder.getStringAttr(
+                        options.autoGraphRuleDatabase));
+  module->setAttr(kAutoGraphOnlineBudgetAttrName,
+                  moduleBuilder.getI64IntegerAttr(
+                      options.maxAutoGraphOnlineMilliseconds));
+  module->setAttr(kAutoGraphRewriteBudgetAttrName,
+                  moduleBuilder.getI64IntegerAttr(
+                      options.maxRewritesPerFunction));
+  module->setAttr(kAutoGraphTarget91095AttrName,
+                  moduleBuilder.getBoolAttr(options.compileOn91095));
 
-  SmallVector<std::unique_ptr<GraphOptimizationRule>> ownedRules;
-  populateBuiltinGraphOptimizationRules(options, ownedRules);
+  materializeAutoOverflowAssertMarkers(module);
 
-  SmallVector<GraphOptimizationRule *> enabledRules;
-  llvm::DenseSet<GraphOptimizationRuleMask> registeredRuleMasks;
-  for (const std::unique_ptr<GraphOptimizationRule> &rule : ownedRules) {
-    if (!rule) {
-      getOperation().emitError()
-          << "graph-optimize builtin rule factory returned null";
-      signalPassFailure();
-      return;
-    }
+  SmallVector<std::unique_ptr<GraphOptimizationProvider>> ownedProviders;
+  populateBuiltinGraphOptimizationProviders(options, ownedProviders);
 
-    const GraphOptimizationRuleMask ruleMask =
-        getGraphOptimizationRuleMask(rule->getId());
-    if (ruleMask == 0 || !isValidGraphOptimizationRuleMask(ruleMask) ||
-        !isRuleEnabled(options.enabledRuleMask, rule->getId()) ||
-        !registeredRuleMasks.insert(ruleMask).second) {
-      getOperation().emitError()
-          << "graph-optimize registered an invalid, disabled, or duplicate "
-             "rule ID: "
-          << ruleMask;
-      signalPassFailure();
-      return;
-    }
-    enabledRules.push_back(rule.get());
-  }
+  SmallVector<GraphOptimizationProvider *> enabledProviders;
+  for (const std::unique_ptr<GraphOptimizationProvider> &provider :
+       ownedProviders)
+    if (provider)
+      enabledProviders.push_back(provider.get());
 
   for (triton::FuncOp function : module.getOps<triton::FuncOp>()) {
     ResourceSnapshot resources = ResourceSnapshot::fromExplicit(
@@ -360,227 +337,121 @@ void GraphOptimizePass::runOnOperation() {
     GraphOptimizationContext context(function, resources);
     unsigned rewriteCount = 0;
 
-    for (GraphOptimizationRulePhase phase : kRulePhases) {
-      while (rewriteCount < options.maxRewritesPerFunction) {
-        ProgramOrderMap programOrder = buildProgramOrderMap(function);
-        SmallVector<std::unique_ptr<RewritePlan>> plans;
+    while (rewriteCount < options.maxRewritesPerFunction) {
+      ProgramOrderMap programOrder = buildProgramOrderMap(function);
+      SmallVector<std::unique_ptr<RewritePlan>> plans;
 
-        for (GraphOptimizationRule *rule : enabledRules) {
-          if (getGraphOptimizationRulePhase(rule->getId()) != phase)
-            continue;
-
-          if (failed(context.ensure(rule->getAnalysisRequirements()))) {
-            function.emitError() << "graph-optimize failed to build analyses";
-            signalPassFailure();
-            return;
-          }
-
-          if (failed(rule->findCandidates(context, plans))) {
-            function.emitError()
-                << "graph-optimize failed to discover rewrite candidates";
-            signalPassFailure();
-            return;
-          }
-        }
-
-        plans.erase(
-            std::remove_if(plans.begin(), plans.end(),
-                           [phase](const std::unique_ptr<RewritePlan> &plan) {
-                             return !plan || getGraphOptimizationRulePhase(
-                                                 plan->getRuleId()) != phase;
-                           }),
-            plans.end());
-        if (plans.empty())
-          break;
-
-        std::stable_sort(
-            plans.begin(), plans.end(),
-            [&programOrder](const std::unique_ptr<RewritePlan> &lhs,
-                            const std::unique_ptr<RewritePlan> &rhs) {
-              const unsigned lhsOrder = getProgramOrder(*lhs, programOrder);
-              const unsigned rhsOrder = getProgramOrder(*rhs, programOrder);
-              return isPlanHigherPriority(lhs->getBenefit(), lhsOrder,
-                                          lhs->getRuleId(), rhs->getBenefit(),
-                                          rhsOrder, rhs->getRuleId());
-            });
-
-        std::unique_ptr<RewritePlan> selectedPlan;
-        for (std::unique_ptr<RewritePlan> &plan : plans) {
-          if (plan->getCreationEpoch() != context.getEpoch())
-            continue;
-          if (failed(plan->revalidate(context))) {
-            LLVM_DEBUG(
-                llvm::dbgs()
-                << "[" DEBUG_TYPE "] dropped stale graph optimization rule "
-                << getGraphOptimizationRuleMask(plan->getRuleId()) << " ("
-                << getGraphOptimizationRuleName(plan->getRuleId()) << ")\n");
-            continue;
-          }
-
-          selectedPlan = std::move(plan);
-          break;
-        }
-
-        if (!selectedPlan) {
-          plans.clear();
-          break;
-        }
-
-        const GraphOptimizationRuleId appliedRuleId = selectedPlan->getRuleId();
-        IRRewriter rewriter(&getContext());
-        if (failed(selectedPlan->apply(rewriter))) {
-          selectedPlan.reset();
-          plans.clear();
-          function.emitError() << "graph-optimize failed to apply rewrite";
+      // Every enabled domain contributes alternatives to one candidate pool.
+      // The driver chooses one globally best valid plan for this IR epoch,
+      // applies it transactionally, invalidates facts, and solves again.
+      for (GraphOptimizationProvider *provider : enabledProviders) {
+        if (failed(context.ensure(provider->getAnalysisRequirements()))) {
+          function.emitError() << "graph-optimize failed to build analyses";
           signalPassFailure();
           return;
         }
-        if (requiresPostRewriteCleanup(appliedRuleId) &&
-            failed(runStructuralCleanup())) {
-          selectedPlan.reset();
-          plans.clear();
+        if (failed(provider->findCandidates(context, plans))) {
           function.emitError()
-              << "graph-optimize failed structural rewrite cleanup";
+              << "graph-optimize failed to discover rewrite candidates";
           signalPassFailure();
           return;
         }
+      }
 
-        LLVM_DEBUG(llvm::dbgs()
-                   << "[" DEBUG_TYPE "] applied graph optimization rule "
-                   << getGraphOptimizationRuleMask(appliedRuleId) << " ("
-                   << getGraphOptimizationRuleName(appliedRuleId) << ")\n");
+      plans.erase(
+          std::remove_if(
+              plans.begin(), plans.end(),
+              [&options](const std::unique_ptr<RewritePlan> &plan) {
+                return !plan || !isRuleEnabled(options.enabledRuleMask,
+                                                plan->getRuleId());
+              }),
+          plans.end());
+      if (plans.empty())
+        break;
 
-        // Plans can retain pointers into analysis results, so destroy all of
-        // them before invalidating the context for the next IR epoch.
+      std::stable_sort(
+          plans.begin(), plans.end(),
+          [&programOrder](const std::unique_ptr<RewritePlan> &lhs,
+                          const std::unique_ptr<RewritePlan> &rhs) {
+            if (lhs->getBenefit() != rhs->getBenefit())
+              return lhs->getBenefit() > rhs->getBenefit();
+
+            const unsigned lhsOrder = getProgramOrder(*lhs, programOrder);
+            const unsigned rhsOrder = getProgramOrder(*rhs, programOrder);
+            if (lhsOrder != rhsOrder)
+              return lhsOrder < rhsOrder;
+
+            return static_cast<unsigned>(lhs->getRuleId()) <
+                   static_cast<unsigned>(rhs->getRuleId());
+          });
+
+      std::unique_ptr<RewritePlan> selectedPlan;
+      for (std::unique_ptr<RewritePlan> &plan : plans) {
+        if (plan->getCreationEpoch() != context.getEpoch())
+          continue;
+        if (failed(plan->revalidate(context))) {
+          LLVM_DEBUG(
+              llvm::dbgs()
+              << "[" DEBUG_TYPE "] dropped stale graph optimization rule "
+              << static_cast<unsigned>(plan->getRuleId()) << " ("
+              << getGraphOptimizationRuleName(plan->getRuleId()) << ")\n");
+          continue;
+        }
+        selectedPlan = std::move(plan);
+        break;
+      }
+      if (!selectedPlan)
+        break;
+
+      const GraphOptimizationRuleId appliedRuleId = selectedPlan->getRuleId();
+      IRRewriter rewriter(&getContext());
+      if (failed(selectedPlan->apply(rewriter))) {
         selectedPlan.reset();
         plans.clear();
-        context.invalidate();
-        ++rewriteCount;
+        function.emitError() << "graph-optimize failed to apply rewrite";
+        signalPassFailure();
+        return;
       }
 
-      if (rewriteCount == options.maxRewritesPerFunction)
-        break;
-    }
-
-    // RowCoalescing has the same function-local candidate/rewrite interface
-    // as the native graph rules, but it has distinct launch semantics.  Its
-    // historical pass ran once and was not subject to the generic rewrite
-    // budget, so run it once after LoadStoreTranspose,
-    // TransposePointwiseReorder, and StoreCoalescing even when that budget
-    // has already been exhausted.
-    if (!isRuleEnabled(options.enabledRuleMask,
-                       GraphOptimizationRuleId::RowCoalescing))
-      continue;
-    if (module->hasAttr(kProgramGridTransformsAttr))
-      continue;
-
-    GraphOptimizationRule *rowRule = nullptr;
-    for (GraphOptimizationRule *rule : enabledRules) {
-      if (rule->getId() == GraphOptimizationRuleId::RowCoalescing) {
-        rowRule = rule;
-        break;
-      }
-    }
-    if (!rowRule)
-      continue;
-
-    if (failed(context.ensure(rowRule->getAnalysisRequirements()))) {
-      function.emitError() << "graph-optimize failed to build Row analyses";
-      signalPassFailure();
-      return;
-    }
-
-    SmallVector<std::unique_ptr<RewritePlan>> rowPlans;
-    if (failed(rowRule->findCandidates(context, rowPlans))) {
-      function.emitError() << "graph-optimize failed to discover Row candidate";
-      signalPassFailure();
-      return;
-    }
-    rowPlans.erase(
-        std::remove_if(rowPlans.begin(), rowPlans.end(),
-                       [](const std::unique_ptr<RewritePlan> &plan) {
-                         return !plan ||
-                                plan->getRuleId() !=
-                                    GraphOptimizationRuleId::RowCoalescing;
-                       }),
-        rowPlans.end());
-    if (rowPlans.empty())
-      continue;
-
-    ProgramOrderMap programOrder = buildProgramOrderMap(function);
-    std::stable_sort(
-        rowPlans.begin(), rowPlans.end(),
-        [&programOrder](const std::unique_ptr<RewritePlan> &lhs,
-                        const std::unique_ptr<RewritePlan> &rhs) {
-          const unsigned lhsOrder = getProgramOrder(*lhs, programOrder);
-          const unsigned rhsOrder = getProgramOrder(*rhs, programOrder);
-          return isPlanHigherPriority(lhs->getBenefit(), lhsOrder,
-                                      lhs->getRuleId(), rhs->getBenefit(),
-                                      rhsOrder, rhs->getRuleId());
-        });
-
-    std::unique_ptr<RewritePlan> selectedRowPlan;
-    for (std::unique_ptr<RewritePlan> &plan : rowPlans) {
-      if (plan->getCreationEpoch() != context.getEpoch())
-        continue;
-      if (failed(plan->revalidate(context)))
-        continue;
-      selectedRowPlan = std::move(plan);
-      break;
-    }
-    if (!selectedRowPlan)
-      continue;
-
-    IRRewriter rewriter(&getContext());
-    switch (selectedRowPlan->applyWithResult(rewriter)) {
-    case RewritePlanApplyResult::Applied:
-      break;
-    case RewritePlanApplyResult::NotApplicable:
       LLVM_DEBUG(llvm::dbgs()
-                 << "[" DEBUG_TYPE << "] declined graph optimization rule "
-                 << static_cast<unsigned>(
-                        GraphOptimizationRuleId::RowCoalescing)
-                 << " ("
-                 << getGraphOptimizationRuleName(
-                        GraphOptimizationRuleId::RowCoalescing)
-                 << ") after detached materialization\n");
-      selectedRowPlan.reset();
-      rowPlans.clear();
-      continue;
-    case RewritePlanApplyResult::Failed:
-      selectedRowPlan.reset();
-      rowPlans.clear();
-      function.emitError() << "graph-optimize failed to apply Row rewrite";
-      signalPassFailure();
-      return;
-    }
-    LLVM_DEBUG(llvm::dbgs()
-               << "[" DEBUG_TYPE "] applied graph optimization rule "
-               << getGraphOptimizationRuleMask(
-                      GraphOptimizationRuleId::RowCoalescing)
-               << " ("
-               << getGraphOptimizationRuleName(
-                      GraphOptimizationRuleId::RowCoalescing)
-               << ")\n");
+                 << "[" DEBUG_TYPE "] applied graph optimization rule "
+                 << static_cast<unsigned>(appliedRuleId) << " ("
+                 << getGraphOptimizationRuleName(appliedRuleId) << ")\n");
 
-    selectedRowPlan.reset();
-    rowPlans.clear();
-    context.invalidate();
+      // Plans can retain pointers into analysis results, so destroy all of
+      // them before invalidating the context for the next IR epoch.
+      selectedPlan.reset();
+      plans.clear();
+      context.invalidate();
+      ++rewriteCount;
+    }
+
+    // The frontend attaches these only as proof inputs for the whole-kernel
+    // AGS key.  They must not leak into TritonAdapter or target IR after this
+    // pass has consumed them.
+    function->removeAttr("ags.launch_grid_bound_axes");
+    function->removeAttr("ags.launch_grid_bound_arguments");
+    function->removeAttr("ags.launch_grid_bound_axis");
+    function->removeAttr("ags.launch_grid_bound_argument");
   }
 }
 
 } // namespace
 
-void populateBuiltinGraphOptimizationRules(
+void populateBuiltinGraphOptimizationProviders(
     const GraphOptimizationOptions &options,
-    SmallVectorImpl<std::unique_ptr<GraphOptimizationRule>> &rules) {
+    SmallVectorImpl<std::unique_ptr<GraphOptimizationProvider>> &providers) {
+  if (isRuleEnabled(options.enabledRuleMask,
+                    GraphOptimizationRuleId::AutoGraphSolver)) {
+    providers.push_back(createAutoGraphSolverAdapter(options));
+  }
   if (isRuleEnabled(options.enabledRuleMask,
                     GraphOptimizationRuleId::DiagonalMaskRemoval)) {
-    rules.push_back(createDiagonalMaskRemovalRule());
+    providers.push_back(createDiagonalMaskRemovalRule());
   }
   if (isRuleEnabled(options.enabledRuleMask,
                     GraphOptimizationRuleId::ConvertModuloToMask)) {
-    rules.push_back(createConvertModuloToMaskRule());
+    providers.push_back(createConvertModuloToMaskRule());
   }
   if (isRuleEnabled(options.enabledRuleMask,
                     GraphOptimizationRuleId::IndependentAxisTensorize)) {
@@ -594,37 +465,15 @@ void populateBuiltinGraphOptimizationRules(
   }
   if (isRuleEnabled(options.enabledRuleMask,
                     GraphOptimizationRuleId::LoadStoreTranspose)) {
-    rules.push_back(createLoadStoreTransposeRule());
+    providers.push_back(createLoadStoreTransposeRule());
   }
   if (isRuleEnabled(options.enabledRuleMask,
                     GraphOptimizationRuleId::TransposePointwiseReorder)) {
-    rules.push_back(createTransposePointwiseReorderRule());
+    providers.push_back(createTransposePointwiseReorderRule());
   }
   if (isRuleEnabled(options.enabledRuleMask,
                     GraphOptimizationRuleId::StoreCoalescing)) {
-    rules.push_back(createStoreCoalescingRule(
-        options.storeCoalescingUBBudgetBytes, options.storeCoalescing));
-  }
-  if (isRuleEnabled(options.enabledRuleMask,
-                    GraphOptimizationRuleId::ResidentLoadForwarding)) {
-    rules.push_back(
-        createResidentLoadForwardingRule(options.residentLoadForwarding));
-  }
-  if (isRuleEnabled(
-          options.enabledRuleMask,
-          GraphOptimizationRuleId::IntermediatePrecisionBoundaryElision)) {
-    rules.push_back(createIntermediatePrecisionBoundaryElisionRule(
-        options.intermediatePrecisionBoundaryElision));
-  }
-  if (isRuleEnabled(options.enabledRuleMask,
-                    GraphOptimizationRuleId::StoreCoveragePlanning)) {
-    rules.push_back(
-        createStoreCoveragePlanningRule(options.storeCoveragePlanning));
-  }
-  if (isRuleEnabled(options.enabledRuleMask,
-                    GraphOptimizationRuleId::ContiguousBlockAccessFormation)) {
-    rules.push_back(createContiguousBlockAccessFormationRule(
-        options.contiguousBlockAccessFormation));
+    providers.push_back(createStoreCoalescingRule(options.ubCapacityBytes));
   }
   if (isRuleEnabled(options.enabledRuleMask,
                     GraphOptimizationRuleId::SelectedBlockScan)) {
@@ -636,10 +485,10 @@ void populateBuiltinGraphOptimizationRules(
   }
   const auto compileMode =
       triton::ascend::parseCompileMode(options.compileMode);
-  if (compileMode && isRuleEnabled(options.enabledRuleMask,
-                                   GraphOptimizationRuleId::RowCoalescing)) {
-    rules.push_back(createRowCoalescingRule(
-        *compileMode == triton::ascend::CompileMode::SimtOnly));
+  if (compileMode && *compileMode == triton::ascend::CompileMode::SimtOnly &&
+      isRuleEnabled(options.enabledRuleMask,
+                    GraphOptimizationRuleId::RowCoalescing)) {
+    providers.push_back(createRowCoalescingRule());
   }
 }
 

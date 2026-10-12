@@ -1,7 +1,7 @@
 // RUN: triton-opt %s --verify-each -graph-optimize='rule-mask=4 ub-capacity-bytes=64' -o - | FileCheck %s --check-prefix=CHECK
 // RUN: triton-opt %s --verify-each -graph-optimize='rule-mask=4 ub-capacity-bytes=0' -o - | FileCheck %s --check-prefix=CAP0
 // RUN: triton-opt %s --verify-each -graph-optimize='rule-mask=4 ub-capacity-bytes=256' -o - | FileCheck %s --check-prefix=DYNAMIC
-// RUN: triton-opt %s --verify-each -graph-optimize='rule-mask=4 ub-capacity-bytes=64 compile-mode=simt_only' -o - | FileCheck %s --check-prefix=PURE-SIMT
+// RUN: triton-opt %s --verify-each -graph-optimize='rule-mask=4091 ub-capacity-bytes=64' -o - | FileCheck %s --check-prefix=P07-OFF
 
 // Address order, rather than program order, determines the packed value
 // layout.  The high interval is deliberately stored first.  The replacement
@@ -18,6 +18,11 @@
 // CHECK-NEXT: tt.store %[[ADDRESS]], %[[PACKED]] : tensor<8x!tt.ptr<i32>>
 // CHECK-NOT: tt.store
 // CHECK-NOT: tensor.insert_slice
+// P07-OFF-LABEL: tt.func @pack_reverse_program_order(
+// P07-OFF-NOT: tensor.empty
+// P07-OFF-NOT: tensor.insert_slice
+// P07-OFF: tt.store {{.*}} : tensor<4x!tt.ptr<i32>>
+// P07-OFF: tt.store {{.*}} : tensor<4x!tt.ptr<i32>>
 tt.func @pack_reverse_program_order(%base: !tt.ptr<i32>) {
   %low_range = tt.make_range {end = 4 : i32, start = 0 : i32} : tensor<4xi32>
   %high_range = tt.make_range {end = 8 : i32, start = 4 : i32} : tensor<4xi32>

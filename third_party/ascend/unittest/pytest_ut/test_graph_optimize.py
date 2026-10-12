@@ -60,7 +60,7 @@ def graph_optimize_legacy_memory_isolation_kernel(x_ptr, y_ptr, BLOCK: tl.conste
     # This is deliberately a strided AddPtr load/store shape.  It is eligible
     # for the legacy T2L StridedLoadStoreRewrite, but must remain untouched by
     # the early generic graph-optimize pass even when its default mask carries
-    # all seven rule identities.
+    # all twelve rule identities.
     offsets = tl.arange(0, BLOCK) * 3
     value = tl.load(x_ptr + offsets)
     tl.store(y_ptr + offsets, value)
@@ -71,7 +71,8 @@ def diagonal_shift_forward_kernel(x_ptr, y_ptr, BLOCK: tl.constexpr):
     # Shift a cumulative sum left by one the way the segmented-cumsum kernels
     # spell it: a sub-diagonal mask over a BLOCK x BLOCK matrix, reduced back
     # to one dimension.  DiagonalMaskRemoval must collapse it to a subtraction.
-    offsets = tl.arange(0, BLOCK)
+    segment = tl.program_id(0)
+    offsets = segment * BLOCK + tl.arange(0, BLOCK)
     x = tl.load(x_ptr + offsets)
     cumulative = tl.cumsum(x, axis=0)
     rows = tl.arange(0, BLOCK)[:, None]
@@ -89,6 +90,19 @@ def diagonal_shift_reverse_kernel(x_ptr, y_ptr, BLOCK: tl.constexpr):
     rows = tl.arange(0, BLOCK)[:, None]
     cols = tl.arange(0, BLOCK)[None, :]
     matrix = tl.where(rows == cols - 1, cumulative[None, :], 0.0)
+    tl.store(y_ptr + offsets, tl.sum(matrix, axis=1))
+
+
+@triton.jit
+def diagonal_shift_forward_integer_kernel(x_ptr, y_ptr, BLOCK: tl.constexpr):
+    """Integer form used by the exact AutoGraphSolver equivalence proof."""
+    segment = tl.program_id(0)
+    offsets = segment * BLOCK + tl.arange(0, BLOCK)
+    x = tl.load(x_ptr + offsets)
+    cumulative = tl.cumsum(x, axis=0)
+    rows = tl.arange(0, BLOCK)[:, None]
+    cols = tl.arange(0, BLOCK)[None, :]
+    matrix = tl.where(rows == cols + 1, cumulative[None, :], 0)
     tl.store(y_ptr + offsets, tl.sum(matrix, axis=1))
 
 
@@ -319,13 +333,12 @@ def test_default_graph_mask_enables_iat_ptsm_and_keeps_nsa_rule_pair_off():
 
 
 def test_default_generic_graph_mask_excludes_legacy_memory_compatibility(tmp_path, ):
-    """The 8/16/32/64 identities are enabled by default, not generic rules.
+    """The 16/32/64 identities are enabled by default but stage-local.
 
-    The generic GraphOptimizePass runs at early TTIR.  Row, Axis, Chunk, and
-    StridedLoadStoreRewrite retain their original compatibility-pass slots, so
-    this strided memory shape must not acquire either coalescing metadata or
-    an indirect-memory op merely because the default mask carries the native
-    bundle plus the #2686 Rule A/B pair.
+    GraphOptimizePass records the common mask at early TTIR. Axis, Chunk, and
+    StridedLoadStoreRewrite consume it only at their TritonToLinalg slots, so
+    this TTIR-only result must not yet acquire coalescing metadata or an
+    indirect-memory op merely because the default mask is 4095.
     """
     options = NPUOptions(arch="Ascend910_95", enable_graph_optimize=True)
     default_result = make_ttir(
@@ -344,14 +357,12 @@ def test_default_generic_graph_mask_excludes_legacy_memory_compatibility(tmp_pat
 
 
 def test_default_graph_mask_preserves_native_graph_rule_bundle(monkeypatch, tmp_path):
-    """The default mask retains native 1|2|4 behavior, including StoreCoalescing,
-    without running legacy rules.
+    """Default 4095 retains the early-TTIR graph-rule bundle.
 
     This input has the LoadStoreTranspose (bit 1) structural signature.  The
-    default all-identity mask must retain that native rewrite.  Together with
-    the legacy isolation test above, this catches either failure mode:
-    accidentally dropping native rules, or scheduling compatibility passes
-    from the early generic graph pass.
+    default all-identity mask must retain that rewrite. Together with the
+    stage-isolation test above, this catches either failure mode: accidentally
+    dropping TTIR rules, or executing later-stage materializers too early.
     """
     monkeypatch.setenv("TRITON_DUMP_DIR", str(tmp_path / "dump"))
 
@@ -420,10 +431,13 @@ def test_auto_overflow_assert_has_frontend_provenance_marker():
         {},
     )
     overflow_asserts = [
-        line for line in str(module).splitlines() if '"int32 overflow detected for operation mul"' in line
+        line for line in str(module).splitlines() if 'overflow detected for operation mul' in line
     ]
-    assert any("tt.auto_overflow_assert" in line for line in overflow_asserts)
-    assert any("tt.auto_overflow_assert" not in line for line in overflow_asserts)
+    # The common Triton builder emits only a normal tt.assert.  AscendSemantic
+    # carries provenance through a private message prefix; GraphOptimizePass
+    # materializes tt.auto_overflow_assert before AGS consumes the IR.
+    assert any("__triton_ascend_auto_overflow__: " in line for line in overflow_asserts)
+    assert any("__triton_ascend_auto_overflow__: " not in line for line in overflow_asserts)
 
 
 def test_fused_swiglu_bwd_b_256x32_graph_optimize_structure(monkeypatch, tmp_path):
@@ -685,10 +699,10 @@ def test_fused_swiglu_bwd_b_small_tiling_graph_optimize_equivalence(monkeypatch,
     write_summary()
 
 
-def make_diagonal_shift_ttir(kernel, options, block=16, rule_mask=None):
+def make_diagonal_shift_ttir(kernel, options, block=16, rule_mask=None, pointer_type="*fp32"):
     source = ASTSource(
         kernel,
-        {"x_ptr": "*fp32", "y_ptr": "*fp32"},
+        {"x_ptr": pointer_type, "y_ptr": pointer_type},
         {"BLOCK": block},
     )
     context = ir.context()
@@ -728,10 +742,10 @@ def test_diagonal_mask_removal_collapses_quadratic_shift(kernel):
     ids=("forward-left-shift", "reverse-right-shift"),
 )
 def test_diagonal_mask_removal_is_gated_by_its_rule_bit(kernel):
-    """Mask 127 is every other identity, so the pattern must survive intact."""
+    """The all-minus-P03 mask keeps every other rule enabled."""
     options = NPUOptions(arch="Ascend910B1", enable_graph_optimize=False)
 
-    ttir = make_diagonal_shift_ttir(kernel, options, rule_mask=127)
+    ttir = make_diagonal_shift_ttir(kernel, options, rule_mask=3967)
 
     assert "tt.reduce" in ttir
     assert "tensor<16x16xf32>" in ttir
@@ -798,6 +812,52 @@ def test_diagonal_mask_removal_numerical_equivalence(monkeypatch, tmp_path):
     torch.testing.assert_close(outputs[True], outputs[False], rtol=1e-5, atol=1e-6)
 
 
+def test_auto_graph_solver_diagonal_integer_equivalence(monkeypatch, tmp_path):
+    """B0, manual P03, and AGS agree exactly on the same pure integer graph.
+
+    Integer overflow sanitization inserts side-effecting ``tt.assert``
+    operations into the scan/reduce regions.  Those regions are deliberately
+    outside the solver's pure-island contract, so this semantic POC disables
+    the instrumentation for all three modes instead of silently discarding
+    assertions while importing the graph.
+    """
+    torch = _require_npu()
+    monkeypatch.setenv("TRITON_ALWAYS_COMPILE", "1")
+    monkeypatch.setenv("TRITON_ASCEND_GRAPH_EXPERIMENT_NARROW_UNSIGNED_MASK", "0")
+    source = torch.arange(1, 17, dtype=torch.int32, device="npu")
+    expected = torch.cat([
+        torch.zeros(1, dtype=torch.int32),
+        torch.cumsum(source.cpu(), dim=0)[:-1].to(torch.int32),
+    ])
+
+    configurations = (
+        ("b0", False, "0", "tt.reduce", "arith.subi"),
+        ("b1", True, "128", "arith.subi", "tt.reduce"),
+        ("b2", True, "2048", "arith.subi", "tt.reduce"),
+    )
+    outputs = {}
+    for name, enabled, rule_mask, present, absent in configurations:
+        monkeypatch.setenv("TRITON_ASCEND_GRAPH_EXPERIMENT_RULE_MASK", rule_mask)
+        diagonal_shift_forward_integer_kernel.device_caches.clear()
+        output = torch.empty_like(source)
+        compiled = diagonal_shift_forward_integer_kernel[(1, )](
+            source,
+            output,
+            BLOCK=16,
+            enable_graph_optimize=enabled,
+            sanitize_overflow=False,
+        )
+        torch.npu.synchronize()
+        ttir = compiled.asm["ttir"]
+        assert present in ttir
+        assert absent not in ttir
+        assert_ttir_text_reparseable(ttir, tmp_path, f"diagonal-integer-{name}")
+        outputs[name] = output.cpu()
+
+    for output in outputs.values():
+        torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+
 def make_wrapped_tile_ttir(options, block_k=8, block_n=16, bound=None, rule_mask=None):
     kernel = wrapped_tile_copy_kernel if bound is None else constexpr_wrapped_tile_copy_kernel
     signature = {"src_ptr": "*fp32", "dst_ptr": "*fp32"}
@@ -838,11 +898,26 @@ def test_convert_modulo_to_mask_linearizes_wrapped_tile():
     assert "arith.constant dense<0.000000e+00> : tensor<8x16xf32>" in ttir
 
 
-def test_convert_modulo_to_mask_is_gated_by_its_rule_bit():
-    """Mask 255 is every other identity, so the wrap must survive intact."""
+def test_auto_graph_solver_linearizes_wrapped_tile():
+    """AGS-only proves the linear masked load without the manual P04 rule."""
     options = NPUOptions(arch="Ascend910B1", enable_graph_optimize=False)
 
-    ttir = make_wrapped_tile_ttir(options, rule_mask=255)
+    ttir = make_wrapped_tile_ttir(options, rule_mask=2048)
+
+    assert "arith.remsi" not in ttir
+    assert "arith.cmpi slt" in ttir
+    assert "tt.load" in ttir
+    # AGS materializes the two-operand masked-load form. Unlike the manual
+    # implementation, it does not invent an observable zero value for lanes
+    # that the store mask discards.
+    assert "tensor<8x16xi1>" in ttir
+
+
+def test_convert_modulo_to_mask_is_gated_by_its_rule_bit():
+    """The all-minus-P04 mask keeps every other rule enabled."""
+    options = NPUOptions(arch="Ascend910B1", enable_graph_optimize=False)
+
+    ttir = make_wrapped_tile_ttir(options, rule_mask=3839)
 
     assert "arith.remsi" in ttir
 
@@ -896,8 +971,15 @@ def test_convert_modulo_to_mask_numerical_equivalence(monkeypatch, tmp_path):
     source = torch.rand(block_k * bound + block_n, dtype=torch.float32, device="npu")
     expected = source[:block_k * bound].cpu()
 
+    configurations = (
+        ("b0", False, "0"),
+        ("b1", True, "256"),
+        ("b2", True, "2048"),
+    )
     outputs = {}
-    for enabled in (False, True):
+    ttirs = {}
+    for name, enabled, rule_mask in configurations:
+        monkeypatch.setenv("TRITON_ASCEND_GRAPH_EXPERIMENT_RULE_MASK", rule_mask)
         wrapped_tile_copy_kernel.device_caches.clear()
         output = torch.zeros(block_k * bound, dtype=torch.float32, device="npu")
         grid = ((bound + block_n - 1) // block_n, )
@@ -913,13 +995,17 @@ def test_convert_modulo_to_mask_numerical_equivalence(monkeypatch, tmp_path):
         assert_ttir_text_reparseable(
             compiled.asm["ttir"],
             tmp_path,
-            f"wrapped-tile-{int(enabled)}",
+            f"wrapped-tile-{name}",
         )
-        outputs[enabled] = output.cpu()
+        outputs[name] = output.cpu()
+        ttirs[name] = compiled.asm["ttir"]
 
-    assert "arith.remsi" not in compiled.asm["ttir"]
-    torch.testing.assert_close(outputs[False], expected, rtol=0, atol=0)
-    torch.testing.assert_close(outputs[True], outputs[False], rtol=0, atol=0)
+    assert "arith.remsi" in ttirs["b0"]
+    assert "arith.remsi" not in ttirs["b1"]
+    assert "arith.remsi" not in ttirs["b2"]
+    torch.testing.assert_close(outputs["b0"], expected, rtol=0, atol=0)
+    torch.testing.assert_close(outputs["b1"], outputs["b0"], rtol=0, atol=0)
+    torch.testing.assert_close(outputs["b2"], outputs["b0"], rtol=0, atol=0)
 
 
 def test_graph_optimize_options_contribute_to_npu_hash():

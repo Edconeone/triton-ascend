@@ -1,0 +1,29 @@
+{
+  "schema_version": 2,
+  "name": "ttg-layout-enumeration-smoke-v1",
+  "target": "generic",
+  "bounds": {
+    "max_nodes": 2,
+    "max_rank": 1,
+    "max_operands": 1,
+    "max_results": 1,
+    "max_shape_symbols": 0,
+    "allow_dynamic_shapes": false,
+    "allow_control_flow": false,
+    "allow_effects": false
+  },
+  "catalog_dialects": ["ttg"],
+  "operations": ["ags.input", "ttg.convert_layout"],
+  "integer_bits": [32],
+  "floating_bits": [],
+  "pointer_address_spaces": [],
+  "integer_constants": [],
+  "tensor_shapes": [[4]],
+  "tensor_encodings": [
+    "#ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>",
+    "#ttg.blocked<{sizePerThread = [4], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>"
+  ],
+  "attribute_domains": {},
+  "semantic_domains": ["definedness", "effect", "index", "layout", "memory", "shape", "signature", "value"]
+}
+

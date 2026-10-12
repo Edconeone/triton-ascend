@@ -158,7 +158,8 @@ bool isRowLiftable(Operation *operation) {
   return isa<triton::SplatOp, triton::AddPtrOp, triton::BroadcastOp,
              triton::ExpandDimsOp, triton::LoadOp, triton::StoreOp,
              triton::MakeRangeOp, triton::ScanOp, triton::ReduceOp,
-             triton::ClampFOp, triton::FpToFpOp, scf::ForOp>(operation);
+             triton::ClampFOp, triton::FpToFpOp, triton::AssertOp,
+             scf::ForOp>(operation);
 }
 
 bool collectRowRegion(const RowSeed &seed,

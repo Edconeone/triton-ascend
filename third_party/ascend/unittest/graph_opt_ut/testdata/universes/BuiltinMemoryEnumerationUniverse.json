@@ -1,0 +1,29 @@
+{
+  "schema_version": 2,
+  "name": "ttir-memory-read-enumeration-smoke-v1",
+  "target": "generic",
+  "bounds": {
+    "max_nodes": 1,
+    "max_rank": 1,
+    "max_operands": 4,
+    "max_results": 1,
+    "max_shape_symbols": 0,
+    "allow_dynamic_shapes": false,
+    "allow_control_flow": false,
+    "allow_effects": true
+  },
+  "catalog_dialects": ["arith", "tt"],
+  "operations": ["ags.input", "ags.memory", "arith.constant", "tt.load", "tt.store"],
+  "integer_bits": [1, 32],
+  "floating_bits": [],
+  "pointer_address_spaces": [1],
+  "integer_constants": [0, 1],
+  "tensor_shapes": [[4]],
+  "attribute_domains": {
+    "load_segments_unmasked": [[1, 0, 0]],
+    "load_segments_masked": [[1, 1, 0]],
+    "load_segments_other": [[1, 1, 1]]
+  },
+  "semantic_domains": ["definedness", "effect", "index", "layout", "memory", "shape", "signature", "value"]
+}
+

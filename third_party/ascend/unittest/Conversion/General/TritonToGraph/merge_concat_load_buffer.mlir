@@ -1,4 +1,6 @@
 // RUN: triton-opt --merge-concat-load-buffer --split-input-file %s | FileCheck %s
+// RUN: triton-opt --graph-optimize='rule-mask=3071' --merge-concat-load-buffer \
+// RUN:            --split-input-file %s | FileCheck %s --check-prefix=MERGE-OFF
 
 //===----------------------------------------------------------------------===//
 // Positive: the canonical tl.cat pattern.
@@ -28,6 +30,9 @@
 // CHECK-NOT:     memref.alloc()
 // CHECK-NOT:     linalg.fill
 // CHECK-NOT:     tensor.insert_slice
+// MERGE-OFF-LABEL: func.func @merge_and_drop_fill
+// MERGE-OFF-COUNT-2: memref.alloc()
+// MERGE-OFF: tensor.insert_slice
 func.func @merge_and_drop_fill(%arg0: memref<32x512xf32>, %arg1: memref<32x512xf32>, %n: index) -> tensor<?x512xf32> {
   %cst = arith.constant 0.000000e+00 : f32
 

@@ -5,6 +5,7 @@
 // RUN: triton-opt %s --verify-each '-graph-optimize=rule-mask=1' -canonicalize -cse -o - | FileCheck %s --check-prefix=POST-EXPAND
 // RUN: triton-opt %s --verify-each '-graph-optimize=rule-mask=1' -canonicalize -cse -o - | FileCheck %s --check-prefix=POST-SPLAT
 // RUN: triton-opt %s --verify-each '-graph-optimize=rule-mask=1' -canonicalize -cse -o - | FileCheck %s --check-prefix=POST-MULI
+// RUN: triton-opt %s --verify-each '-graph-optimize=rule-mask=4094' -o - | FileCheck %s --check-prefix=P06-OFF
 
 // The rule owns one closed component: two masked loads, two stores, a binary
 // fanout, dense-splat `other`/accumulator values, an ordered tt.assert, four
@@ -28,6 +29,10 @@
 // CHECK: tt.store {{.*}}, {{.*}}, {{.*}} : tensor<3x2x!tt.ptr<f32>>
 // CHECK: "tt.reduce"({{.*}}) <{axis = 0 : i32}>
 // CHECK: (tensor<3x2xf32>) -> tensor<2xf32>
+// P06-OFF-LABEL: tt.func @masked_dynamic_stride_loop(
+// P06-OFF: scf.for {{.*}} -> (tensor<2x3x!tt.ptr<f32>>, tensor<2x3x!tt.ptr<f32>>, tensor<2x3x!tt.ptr<f32>>, tensor<2x3x!tt.ptr<f32>>, tensor<2x3xf32>, tensor<2x3xf32>)
+// P06-OFF: tt.load {{.*}} : tensor<2x3x!tt.ptr<f32>>
+// P06-OFF: tt.store {{.*}} : tensor<2x3x!tt.ptr<f32>>
 // POST-LABEL: tt.func @masked_dynamic_stride_loop(
 // POST: tt.assert {{.*}}, "int32 overflow detected for operation mul"{{.*}} : tensor<3x1xi1>
 // POST: tt.assert {{.*}}, "int32 overflow detected for operation add"{{.*}} : tensor<3x2xi1>

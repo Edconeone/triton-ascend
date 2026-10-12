@@ -1,0 +1,30 @@
+{
+  "schema_version": 2,
+  "name": "ttir-launch-state-enumeration-smoke-v1",
+  "target": "ascend950dt",
+  "bounds": {
+    "max_nodes": 2,
+    "max_rank": 0,
+    "max_operands": 2,
+    "max_results": 1,
+    "max_shape_symbols": 0,
+    "allow_dynamic_shapes": false,
+    "allow_control_flow": false,
+    "allow_effects": false
+  },
+  "catalog_dialects": ["tt"],
+  "operations": ["ags.input", "ags.memory", "ags.partitionable_memory", "ags.launch", "ags.launch_bound", "ags.launch_remap", "ags.kernel", "ags.kernel_partition", "tt.get_program_id", "tt.get_num_programs"],
+  "integer_bits": [32],
+  "floating_bits": [],
+  "pointer_address_spaces": [],
+  "integer_constants": [],
+  "tensor_shapes": [],
+  "attribute_domains": {
+    "program_axis": [0, 1, 2],
+    "launch_axis": [0, 1, 2],
+    "launch_factor": [1, 2, 4],
+    "launch_ceil_div": [0, 1]
+  },
+  "semantic_domains": ["definedness", "effect", "index", "launch", "layout", "memory", "shape", "signature", "value"]
+}
+

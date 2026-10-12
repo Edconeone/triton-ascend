@@ -1,0 +1,39 @@
+{
+  "schema_version": 2,
+  "name": "ttir-multi-result-enumeration-smoke-v1",
+  "target": "generic",
+  "bounds": {
+    "max_nodes": 1,
+    "max_rank": 0,
+    "max_operands": 2,
+    "max_results": 2,
+    "max_shape_symbols": 0,
+    "allow_dynamic_shapes": false,
+    "allow_control_flow": false,
+    "allow_effects": false
+  },
+  "catalog_dialects": ["arith"],
+  "operations": [
+    "ags.input",
+    "arith.addui_extended",
+    "arith.mulsi_extended",
+    "arith.mului_extended"
+  ],
+  "integer_bits": [32],
+  "floating_bits": [],
+  "pointer_address_spaces": [],
+  "integer_constants": [],
+  "tensor_shapes": [],
+  "attribute_domains": {},
+  "semantic_domains": [
+    "definedness",
+    "effect",
+    "index",
+    "layout",
+    "memory",
+    "shape",
+    "signature",
+    "value"
+  ]
+}
+

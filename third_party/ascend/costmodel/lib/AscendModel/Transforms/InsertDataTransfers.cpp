@@ -60,7 +60,8 @@ static ComputePath getComputePath(Operation *op) {
   // Vector operations
   if (isa<AddOp, SubOp, MulOp, DivOp, MaxOp, MinOp, ExpOp, LogOp, SqrtOp,
           RsqrtOp, TanhOp, SigmoidOp, NegOp, AbsOp, ReluOp, CastOp, ReduceSumOp,
-          ReduceMaxOp, ReduceMinOp, ReduceProdOp, BroadcastOp, SelectOp>(op))
+          ReduceMaxOp, ReduceMinOp, ReduceProdOp, BroadcastOp, SelectOp,
+          HistogramOp, ScanOp>(op))
     return ComputePath::Vector;
 
   // Memory operations

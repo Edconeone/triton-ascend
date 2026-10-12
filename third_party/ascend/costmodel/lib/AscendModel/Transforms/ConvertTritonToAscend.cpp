@@ -66,6 +66,68 @@ static bool isOpNamed(Operation *op, StringRef name) {
   return op->getName().getStringRef() == name;
 }
 
+enum class BinaryCombinerKind { Add, Mul, Max, Min, Unknown };
+
+/// Classify only a canonical binary region:
+///
+///   ^bb0(%lhs, %rhs):
+///     %value = <one supported binary op> %lhs, %rhs
+///     <terminator> %value
+///
+/// Cost modeling must fail closed for every larger or differently wired
+/// region. A guessed cost is worse than the structural fallback because it can
+/// incorrectly win a Pareto comparison against a fully modeled candidate.
+static BinaryCombinerKind
+classifyCanonicalBinaryRegion(Operation *op, StringRef terminatorName) {
+  if (op->getNumRegions() != 1)
+    return BinaryCombinerKind::Unknown;
+  Region &region = op->getRegion(0);
+  if (region.empty())
+    return BinaryCombinerKind::Unknown;
+  auto blockIt = region.begin();
+  Block &block = *blockIt;
+  ++blockIt;
+  if (blockIt != region.end() || block.getNumArguments() != 2)
+    return BinaryCombinerKind::Unknown;
+
+  Operation *terminator = block.getTerminator();
+  if (!terminator || terminator->getName().getStringRef() != terminatorName ||
+      terminator->getNumOperands() != 1)
+    return BinaryCombinerKind::Unknown;
+
+  Operation *combiner = nullptr;
+  for (Operation &nested : block) {
+    if (&nested == terminator)
+      continue;
+    if (combiner)
+      return BinaryCombinerKind::Unknown;
+    combiner = &nested;
+  }
+  if (!combiner || combiner->getNumOperands() != 2 ||
+      combiner->getNumResults() != 1 ||
+      combiner->getOperand(0) != block.getArgument(0) ||
+      combiner->getOperand(1) != block.getArgument(1) ||
+      terminator->getOperand(0) != combiner->getResult(0))
+    return BinaryCombinerKind::Unknown;
+
+  StringRef name = combiner->getName().getStringRef();
+  if (name == "arith.addi" || name == "arith.addf" ||
+      name == AddOp::getOperationName())
+    return BinaryCombinerKind::Add;
+  if (name == "arith.muli" || name == "arith.mulf" ||
+      name == MulOp::getOperationName())
+    return BinaryCombinerKind::Mul;
+  if (name == "arith.maxsi" || name == "arith.maxui" ||
+      name == "arith.maxnumf" || name == "arith.maximumf" ||
+      name == MaxOp::getOperationName())
+    return BinaryCombinerKind::Max;
+  if (name == "arith.minsi" || name == "arith.minui" ||
+      name == "arith.minnumf" || name == "arith.minimumf" ||
+      name == MinOp::getOperationName())
+    return BinaryCombinerKind::Min;
+  return BinaryCombinerKind::Unknown;
+}
+
 /// Walk back through the Triton pointer arithmetic chain:
 ///   tt.load <- tt.addptr <- tt.splat <- %blockArg
 /// Returns the ultimate source Value (typically a function argument).
@@ -218,8 +280,13 @@ struct ConvertTritonDot : public RewritePattern {
         if (defOp->getName().getStringRef() == "arith.constant") {
           if (auto attr = defOp->getAttr("value")) {
             if (auto denseAttr = dyn_cast<DenseElementsAttr>(attr)) {
-              isZeroAcc = denseAttr.isSplat() &&
-                          denseAttr.getSplatValue<APFloat>().isZero();
+              if (denseAttr.isSplat()) {
+                Type elementType = denseAttr.getElementType();
+                if (isa<FloatType>(elementType))
+                  isZeroAcc = denseAttr.getSplatValue<APFloat>().isZero();
+                else if (isa<IntegerType>(elementType))
+                  isZeroAcc = denseAttr.getSplatValue<APInt>().isZero();
+              }
             }
           }
         }
@@ -319,27 +386,30 @@ struct ConvertTritonLoad : public RewritePattern {
   }
 };
 
-/// Convert tt.trans -> direct replacement (zero cost in perf modeling)
+/// Mark logical TT address/shape operations as modeled zero-cost operations.
 ///
-/// Transpose is a logical reshape that doesn't incur hardware cost
-/// on Ascend (handled by address calculation in hardware).
-/// We replace it directly with its input for modeling purposes.
-struct ConvertTritonTrans : public RewritePattern {
-  ConvertTritonTrans(MLIRContext *ctx)
+/// Keeping the operation preserves exact SSA types (notably for transposes and
+/// rank-changing expand_dims) while removing the source marker tells the
+/// graph-cost adapter that the operation is deliberately handled. Downstream
+/// StageModel passes ignore operations without an EstimateCycles interface.
+struct MarkZeroCostTritonLogicalOp : public RewritePattern {
+  MarkZeroCostTritonLogicalOp(MLIRContext *ctx)
       : RewritePattern(MatchAnyOpTypeTag(), /*benefit=*/10, ctx) {}
 
   LogicalResult matchAndRewrite(Operation *op,
                                 PatternRewriter &rewriter) const override {
-    if (!isOpNamed(op, "tt.trans"))
+    if (!op->hasAttr("ags.stage_source_hash"))
       return failure();
-
-    if (op->getNumOperands() == 0 || op->getNumResults() == 0)
+    StringRef name = op->getName().getStringRef();
+    if (name != "tt.addptr" && name != "tt.splat" &&
+        name != "tt.make_range" && name != "tt.expand_dims" &&
+        name != "tt.get_program_id" && name != "tt.get_num_programs" &&
+        name != "tt.int_to_ptr" && name != "tt.ptr_to_int" &&
+        name != "tt.bitcast" && name != "tt.trans" &&
+        name != "tt.reshape")
       return failure();
-
-    // tt.trans just reorders the tensor - for perf modeling we pass through
-    // The actual memory access pattern is handled by the load/store
-    Value input = op->getOperand(0);
-    rewriter.replaceOp(op, input);
+    op->removeAttr("ags.stage_source_hash");
+    op->setAttr("estimated_cycles", rewriter.getI64IntegerAttr(0));
     return success();
   }
 };
@@ -427,6 +497,9 @@ struct ConvertTritonReduce : public RewritePattern {
 
   LogicalResult matchAndRewrite(Operation *op,
                                 PatternRewriter &rewriter) const override {
+    if (op->getNumOperands() != 1 || op->getNumResults() != 1 ||
+        !isa<RankedTensorType>(op->getOperand(0).getType()))
+      return failure();
 #ifdef TRITONSIM_HAS_TRITON
     auto reduceOp = dyn_cast<triton::ReduceOp>(op);
     if (!reduceOp)
@@ -443,33 +516,22 @@ struct ConvertTritonReduce : public RewritePattern {
 
     Location loc = op->getLoc();
     auto resultType = op->getResult(0).getType();
-
-    // Determine reduction kind from the body
-    bool isMax = false, isMin = false, isProd = false;
-    if (!op->getRegions().empty()) {
-      Region &region = op->getRegion(0);
-      if (!region.empty()) {
-        Block &block = region.front();
-        for (Operation &innerOp : block) {
-          StringRef innerName = innerOp.getName().getStringRef();
-          if (innerName.contains("max"))
-            isMax = true;
-          else if (innerName.contains("min"))
-            isMin = true;
-          else if (innerName.contains("mul"))
-            isProd = true;
-        }
-      }
-    }
+    auto inputType = cast<RankedTensorType>(op->getOperand(0).getType());
+    if (axis < 0 || axis >= inputType.getRank())
+      return failure();
+    BinaryCombinerKind kind =
+        classifyCanonicalBinaryRegion(op, "tt.reduce.return");
+    if (kind == BinaryCombinerKind::Unknown)
+      return failure();
 
     Operation *newReduceOp;
-    if (isMax) {
+    if (kind == BinaryCombinerKind::Max) {
       newReduceOp = rewriter.create<ReduceMaxOp>(
           loc, resultType, op->getOperand(0), axis, nullptr, nullptr);
-    } else if (isMin) {
+    } else if (kind == BinaryCombinerKind::Min) {
       newReduceOp = rewriter.create<ReduceMinOp>(
           loc, resultType, op->getOperand(0), axis, nullptr, nullptr);
-    } else if (isProd) {
+    } else if (kind == BinaryCombinerKind::Mul) {
       newReduceOp = rewriter.create<ReduceProdOp>(
           loc, resultType, op->getOperand(0), axis, nullptr, nullptr);
     } else {
@@ -478,6 +540,65 @@ struct ConvertTritonReduce : public RewritePattern {
     }
 
     rewriter.replaceOp(op, newReduceOp->getResult(0));
+    return success();
+  }
+};
+
+struct ConvertTritonHistogram : public RewritePattern {
+  ConvertTritonHistogram(MLIRContext *ctx)
+      : RewritePattern("tt.histogram", /*benefit=*/10, ctx) {}
+
+  LogicalResult matchAndRewrite(Operation *op,
+                                PatternRewriter &rewriter) const override {
+    if (op->getNumResults() != 1 || op->getNumOperands() < 1 ||
+        op->getNumOperands() > 2 ||
+        !isa<RankedTensorType>(op->getOperand(0).getType()) ||
+        !isa<RankedTensorType>(op->getResult(0).getType()))
+      return failure();
+
+    OperationState state(op->getLoc(), HistogramOp::getOperationName());
+    state.addOperands(op->getOperands());
+    state.addTypes(op->getResultTypes());
+    Operation *histogram = rewriter.create(state);
+    rewriter.replaceOp(op, histogram->getResults());
+    return success();
+  }
+};
+
+struct ConvertTritonScan : public RewritePattern {
+  ConvertTritonScan(MLIRContext *ctx)
+      : RewritePattern("tt.scan", /*benefit=*/10, ctx) {}
+
+  LogicalResult matchAndRewrite(Operation *op,
+                                PatternRewriter &rewriter) const override {
+    if (op->getNumOperands() != 1 || op->getNumResults() != 1 ||
+        op->getNumRegions() != 1 ||
+        !isa<RankedTensorType>(op->getOperand(0).getType()) ||
+        !isa<RankedTensorType>(op->getResult(0).getType()))
+      return failure();
+    auto inputType = cast<RankedTensorType>(op->getOperand(0).getType());
+    auto axis = op->getAttrOfType<IntegerAttr>("axis");
+    auto reverse = op->getAttrOfType<BoolAttr>("reverse");
+    if (!axis || !reverse || op->getRegion(0).empty())
+      return failure();
+    int64_t axisValue = axis.getInt();
+    if (axisValue < 0 || axisValue >= inputType.getRank())
+      return failure();
+
+    BinaryCombinerKind kind =
+        classifyCanonicalBinaryRegion(op, "tt.scan.return");
+    if (kind != BinaryCombinerKind::Add && kind != BinaryCombinerKind::Mul)
+      return failure();
+    StringRef combiner = kind == BinaryCombinerKind::Add ? "add" : "mul";
+
+    OperationState state(op->getLoc(), ScanOp::getOperationName());
+    state.addOperands(op->getOperand(0));
+    state.addTypes(op->getResultTypes());
+    state.addAttribute("axis", rewriter.getI64IntegerAttr(axisValue));
+    state.addAttribute("reverse", reverse);
+    state.addAttribute("combiner", rewriter.getStringAttr(combiner));
+    Operation *scan = rewriter.create(state);
+    rewriter.replaceOp(op, scan->getResults());
     return success();
   }
 };
@@ -536,7 +657,14 @@ struct ConvertArithBinaryOp : public RewritePattern {
     Location loc = op->getLoc();
     Operation *newOp = nullptr;
 
-    if (name == "arith.addf" || name == "arith.addi") {
+    if (name == "arith.addf" || name == "arith.addi" ||
+        name == "arith.andi" || name == "arith.ori" ||
+        name == "arith.xori" || name == "arith.shli" ||
+        name == "arith.shrsi" || name == "arith.shrui") {
+      // Boolean/bitwise/shift operations use the same single-vector issue
+      // estimate as add. The AscendModel op is a cost carrier; value
+      // equivalence has already been proved by AGS and is not reinterpreted
+      // here.
       newOp =
           rewriter.create<AddOp>(loc, resultType, lhs, rhs, nullptr, nullptr);
     } else if (name == "arith.subf" || name == "arith.subi") {
@@ -546,7 +674,10 @@ struct ConvertArithBinaryOp : public RewritePattern {
       newOp =
           rewriter.create<MulOp>(loc, resultType, lhs, rhs, nullptr, nullptr);
     } else if (name == "arith.divf" || name == "arith.divsi" ||
-               name == "arith.divui") {
+               name == "arith.divui" || name == "arith.remf" ||
+               name == "arith.remsi" || name == "arith.remui" ||
+               name == "arith.ceildivsi" || name == "arith.ceildivui" ||
+               name == "arith.floordivsi") {
       newOp =
           rewriter.create<DivOp>(loc, resultType, lhs, rhs, nullptr, nullptr);
     } else if (name == "arith.maxnumf" || name == "arith.maximumf" ||
@@ -830,10 +961,14 @@ struct ConvertTritonToAscendPass
     patterns.add<ConvertTritonDot>(ctx); // tt.dot -> matmul + cube_store
     patterns.add<ConvertTritonLoad>(
         ctx); // tt.load -> cube_load (for dot) or vector_load
-    patterns.add<ConvertTritonTrans>(
-        ctx); // tt.trans -> pass-through (zero cost)
+    patterns.add<MarkZeroCostTritonLogicalOp>(
+        ctx); // logical address/shape ops retain exact types at zero cost
     patterns.add<ConvertTritonStore>(ctx);  // tt.store -> ascend.vector_store
     patterns.add<ConvertTritonReduce>(ctx); // tt.reduce -> ascend.reduce_*
+    patterns.add<ConvertTritonHistogram>(
+        ctx); // tt.histogram -> ascend.histogram (mask stays native)
+    patterns.add<ConvertTritonScan>(
+        ctx); // tt.scan -> ascend.scan after generic region classification
     patterns.add<ConvertTritonBroadcast>(
         ctx); // tt.broadcast -> ascend.broadcast
     // NOTE: tt.func/tt.return are left as-is (see comment above)

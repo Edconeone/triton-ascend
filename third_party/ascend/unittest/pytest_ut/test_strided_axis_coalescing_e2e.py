@@ -77,8 +77,18 @@ def _launch_spec_from_compiled_metadata(metadata):
     return ascend_driver.make_launch_spec(metadata, ascend_driver.NPUUtils())
 
 
-def test_strided_axis_coalescing_gate_on_e2e():
-    """Compile and run the canonical S=4 axis fold through the real T2L gate."""
+@pytest.mark.parametrize(
+    "rule_mask,expected_contract",
+    (
+        (4095, (4, 0, False)),
+        (4079, (1, -1, False)),
+    ),
+    ids=("all-rules", "all-minus-strided-axis"),
+)
+def test_strided_axis_coalescing_gate_on_e2e(
+    rule_mask, expected_contract, monkeypatch
+):
+    """Compile both sides of the canonical S=4 axis-fold experiment."""
     s = 4
     block = 16
     t = 64
@@ -90,6 +100,10 @@ def test_strided_axis_coalescing_gate_on_e2e():
     # programs and still copy every logical element exactly once.
     src = torch.arange(t * s, dtype=torch.float32, device="npu").reshape(t, s)
     dst = torch.empty_like(src)
+
+    monkeypatch.setenv("TRITON_ALWAYS_COMPILE", "1")
+    monkeypatch.setenv("TRITON_ASCEND_GRAPH_EXPERIMENT_RULE_MASK", str(rule_mask))
+    strided_axis_coalescing_copy.device_caches.clear()
 
     # Compile first through the normal JIT API, then retain its real metadata
     # for the ABI checks below.  Use the canonical public template-SIMT mode.
@@ -121,11 +135,22 @@ def test_strided_axis_coalescing_gate_on_e2e():
     metadata = kernel.metadata
     assert metadata.compile_mode == "simd_simt_template"
     assert metadata.compile_on_910_95 is True
-    assert metadata.coalesce_factor == s
-    assert metadata.coalesce_axis == 0
-    assert metadata.coalesce_grid_ceil_div is False
+    factor, axis, ceil_div = expected_contract
+    assert metadata.coalesce_factor == factor
+    assert metadata.coalesce_axis == axis
+    assert metadata.coalesce_grid_ceil_div is ceil_div
 
-    from triton.backends.ascend.launcher import COALESCE_CEIL
-    spec = _launch_spec_from_compiled_metadata(metadata)
-    assert (spec.coalesce_factor, spec.coalesce_axis) == (s, 0)
-    assert not spec.flags & COALESCE_CEIL
+    launcher_source, launcher_reason = _launcher_source_from_compiled_metadata(metadata)
+    # This is an acceptance test for the compiler-to-launcher handoff, not a
+    # value-only smoke test.  A missing launcher representation would leave
+    # Axis's floor-div grid contract unverified, so it must fail rather than
+    # downgrade the native gate-on result to a warning.
+    assert launcher_source is not None, ("StridedAxisCoalescing launcher source introspection is unavailable: "
+                                         f"{launcher_reason}")
+
+    # make_launcher emits both the C ABI and local C++ launch paths.  Check
+    # both, including Axis's floor-divisibility contract (unlike Row's
+    # ceil-div handling).
+    expected_divisions = 2 if rule_mask == 4095 else 0
+    assert len(re.findall(r"assert\(gridX % 4 == 0", launcher_source)) == expected_divisions
+    assert launcher_source.count("gridX = gridX / 4;") == expected_divisions

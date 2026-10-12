@@ -1,0 +1,52 @@
+{
+  "schema_version": 2,
+  "name": "ttir-value-large-depth1-v1",
+  "target": "ascend950dt",
+  "bounds": {
+    "max_nodes": 1,
+    "max_rank": 2,
+    "max_operands": 3,
+    "max_results": 1,
+    "max_shape_symbols": 2,
+    "allow_dynamic_shapes": true,
+    "allow_control_flow": true,
+    "allow_effects": false
+  },
+  "catalog_dialects": ["arith", "math", "tt"],
+  "operations": [
+    "ags.input",
+    "arith.addi",
+    "arith.andi",
+    "arith.cmpi",
+    "arith.constant",
+    "arith.extsi",
+    "arith.extui",
+    "arith.select",
+    "arith.subi",
+    "arith.trunci",
+    "arith.xori",
+    "tt.broadcast",
+    "tt.expand_dims",
+    "tt.histogram",
+    "tt.make_range",
+    "tt.reduce",
+    "tt.scan",
+    "tt.splat",
+    "tt.trans"
+  ],
+  "integer_bits": [1, 8, 16, 32, 64],
+  "floating_bits": [16, 32],
+  "pointer_address_spaces": [],
+  "integer_constants": [-1, 0, 1],
+  "tensor_shapes": [[-1], [-1, -1], [-1, 16], [1], [1, 16], [16], [16, -1], [16, 1], [16, 16]],
+  "attribute_domains": {
+    "axis": [0, 1],
+    "cmpi_predicate": [0, 2],
+    "range_end": [1, 4, 16],
+    "range_start": [0],
+    "reverse": [false, true],
+    "transpose_order": [[0], [0, 1], [1, 0]]
+  },
+  "semantic_domains": ["definedness", "effect", "index", "layout", "memory", "shape", "signature", "value"]
+}
+

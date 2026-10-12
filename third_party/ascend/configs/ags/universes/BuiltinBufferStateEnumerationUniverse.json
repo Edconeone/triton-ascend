@@ -1,0 +1,27 @@
+{
+  "schema_version": 2,
+  "name": "stage-buffer-state-enumeration-smoke-v2",
+  "target": "ascend950dt",
+  "bounds": {
+    "max_nodes": 2,
+    "max_rank": 1,
+    "max_operands": 3,
+    "max_results": 1,
+    "max_shape_symbols": 0,
+    "allow_dynamic_shapes": false,
+    "allow_control_flow": false,
+    "allow_effects": true
+  },
+  "catalog_dialects": ["bufferization", "memref"],
+  "operations": ["ags.buffer", "ags.input", "ags.private_buffer", "bufferization.to_tensor", "memref.copy"],
+  "integer_bits": [32],
+  "floating_bits": [],
+  "pointer_address_spaces": [],
+  "integer_constants": [],
+  "tensor_shapes": [[4]],
+  "explicit_types": ["memref<4xi32>"],
+  "attribute_domains": {},
+  "semantic_domains": ["buffer", "definedness", "effect", "index", "layout", "shape", "signature", "value"]
+}
+
+

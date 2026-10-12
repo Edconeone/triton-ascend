@@ -22,6 +22,7 @@
 
 #include "TritonToGraph/GraphOptimization.h"
 #include "TritonToGraph/LayoutMemoryOptimization.h"
+#include "TritonToGraph/AutoGraphSolverPipeline.h"
 #include "TritonToGraph/LegacyMemoryAccess/ChunkCoalescing.h"
 #include "TritonToGraph/LegacyMemoryAccess/StridedAxisCoalescing.h"
 #include "TritonToGraph/LegacyMemoryAccess/StridedLoadStoreRewrite.h"
@@ -64,6 +65,30 @@ static std::size_t countStridedLoadStoreRewrites(ModuleOp moduleOp) {
   return count;
 }
 
+static LogicalResult applyAutoGraphSolverForStage(ModuleOp module) {
+  if (!isGraphOptimizationRuleEnabled(
+          module, GraphOptimizationRuleId::AutoGraphSolver))
+    return success();
+
+  GraphOptimizationOptions options;
+  options.enabledRuleMask = getModuleGraphOptimizationRuleMask(module);
+  if (auto path = module->getAttrOfType<StringAttr>(
+          kAutoGraphRuleDatabaseAttrName))
+    options.autoGraphRuleDatabase = path.getValue().str();
+  if (auto budget = module->getAttrOfType<IntegerAttr>(
+          kAutoGraphOnlineBudgetAttrName))
+    options.maxAutoGraphOnlineMilliseconds =
+        static_cast<unsigned>(budget.getInt());
+  if (auto budget = module->getAttrOfType<IntegerAttr>(
+          kAutoGraphRewriteBudgetAttrName))
+    options.maxRewritesPerFunction =
+        static_cast<unsigned>(budget.getInt());
+  if (auto target = module->getAttrOfType<BoolAttr>(
+          kAutoGraphTarget91095AttrName))
+    options.compileOn91095 = target.getValue();
+  return applyAutoGraphSolverDatabase(module, options);
+}
+
 class LayoutMemoryCompatibilityPass final
     : public PassWrapper<LayoutMemoryCompatibilityPass,
                          OperationPass<ModuleOp>> {
@@ -82,9 +107,21 @@ public:
 
   void runOnOperation() override {
     ModuleOp moduleOp = getOperation();
+    // The exact same database executor is used at both T2L compatibility
+    // slots. Which operations are visible differs by stage, but candidate
+    // discovery, proof lookup, cost comparison and transactional
+    // materialization remain generic and are driven only by .ttsem + RuleDB.
+    if (failed(applyAutoGraphSolverForStage(moduleOp))) {
+      signalPassFailure();
+      return;
+    }
+
     bool wasCoalesced = false;
     switch (phase) {
     case LayoutMemoryCompatibilityPhase::BeforeDiagonal:
+      if (!isGraphOptimizationRuleEnabled(
+              moduleOp, GraphOptimizationRuleId::StridedAxisCoalescing))
+        return;
       // Preserve the original module-wide, no-op-on-bailout semantics.  This
       // phase intentionally has no cleanup pass.
       wasCoalesced = moduleOp->hasAttr("hacc.coalesce_factor");
@@ -96,13 +133,25 @@ public:
     case LayoutMemoryCompatibilityPhase::AfterDiagonal:
       // Keep the legacy order.  Chunk sees Axis's module attr and consumes the
       // static-grid hint before the greedy StridedLoadStore patterns run.
-      wasCoalesced = moduleOp->hasAttr("hacc.coalesce_factor");
-      ChunkCoalescing::rewriteChunkCoalesce(moduleOp);
-      if (!wasCoalesced && moduleOp->hasAttr("hacc.coalesce_factor"))
-        emitAppliedGraphOptimizationRule(
-            GraphOptimizationRuleId::ChunkCoalescing);
+      if (isGraphOptimizationRuleEnabled(
+              moduleOp, GraphOptimizationRuleId::ChunkCoalescing)) {
+        wasCoalesced = moduleOp->hasAttr("hacc.coalesce_factor");
+        ChunkCoalescing::rewriteChunkCoalesce(moduleOp);
+        if (!wasCoalesced && moduleOp->hasAttr("hacc.coalesce_factor"))
+          emitAppliedGraphOptimizationRule(
+              GraphOptimizationRuleId::ChunkCoalescing);
+      } else {
+        // This is an internal compiler hint, not program semantics. Consume it
+        // even when the candidate family is disabled so the off experiment
+        // differs only by the selected graph rewrite.
+        moduleOp->removeAttr("hacc.grid_num_tiles");
+      }
       break;
     }
+
+    if (!isGraphOptimizationRuleEnabled(
+            moduleOp, GraphOptimizationRuleId::StridedLoadStoreRewrite))
+      return;
 
     // Count rewrite tags only while this DEBUG_TYPE is active. The tag lets us
     // emit one pass-level match line even when several load/store ops rewrite.

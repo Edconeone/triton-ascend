@@ -1,0 +1,58 @@
+{
+  "schema_version": 2,
+  "name": "ttir-guarded-tail-launch-partition-v2-parameterized",
+  "target": "ascend950dt",
+  "bounds": {
+    "max_nodes": 12,
+    "max_rank": 0,
+    "max_operands": 3,
+    "max_results": 1,
+    "max_shape_symbols": 0,
+    "allow_dynamic_shapes": false,
+    "allow_control_flow": false,
+    "allow_effects": true
+  },
+  "catalog_dialects": ["arith", "tt"],
+  "operations": [
+    "ags.input",
+    "ags.kernel",
+    "ags.kernel_partition",
+    "ags.launch",
+    "ags.launch_bound",
+    "ags.launch_remap",
+    "ags.memory",
+    "ags.partitionable_memory",
+    "arith.addi",
+    "arith.cmpi",
+    "arith.constant",
+    "arith.muli",
+    "tt.addptr",
+    "tt.get_program_id",
+    "tt.store"
+  ],
+  "integer_bits": [1, 32],
+  "floating_bits": [],
+  "pointer_address_spaces": [1],
+  "integer_constants": [0, 1, 2],
+  "tensor_shapes": [],
+  "attribute_domains": {
+    "cmpi_predicate": [2],
+    "launch_axis": [0],
+    "launch_factor": [2, 4, 8, 16],
+    "launch_ceil_div": [1],
+    "program_axis": [0]
+  },
+  "semantic_domains": [
+    "definedness",
+    "effect",
+    "index",
+    "launch",
+    "layout",
+    "memory",
+    "shape",
+    "signature",
+    "value"
+  ]
+}
+
+

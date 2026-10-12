@@ -33,10 +33,10 @@ namespace mlir {
 namespace triton {
 namespace cfg {
 
-// These phases deliberately preserve the T2L insertion points around the
-// legacy diagonal rewrite.  They are not GraphOptimizationRule phases: the
-// legacy rewrites are module-wide and some of them intentionally mutate IR
-// while doing their analysis.
+// These phases preserve the T2L insertion points around the diagonal rewrite.
+// They are stage-local AutoGraphSolver executors rather than TTIR
+// GraphOptimizationRule providers: the required layout/memory facts only exist
+// here, and some materializers intentionally mutate IR during analysis.
 enum class LayoutMemoryCompatibilityPhase : uint8_t {
   BeforeDiagonal,
   AfterDiagonal,

@@ -1,0 +1,26 @@
+{
+  "schema_version": 2,
+  "name": "arith-index-enumeration-smoke-v1",
+  "target": "generic",
+  "bounds": {
+    "max_nodes": 1,
+    "max_rank": 0,
+    "max_operands": 1,
+    "max_results": 1,
+    "max_shape_symbols": 0,
+    "allow_dynamic_shapes": false,
+    "allow_control_flow": false,
+    "allow_effects": false
+  },
+  "catalog_dialects": ["arith"],
+  "operations": ["ags.input", "arith.index_cast", "arith.index_castui"],
+  "integer_bits": [32],
+  "floating_bits": [],
+  "include_index_type": true,
+  "pointer_address_spaces": [],
+  "integer_constants": [],
+  "tensor_shapes": [],
+  "attribute_domains": {},
+  "semantic_domains": ["definedness", "effect", "index", "layout", "memory", "shape", "signature", "value"]
+}
+

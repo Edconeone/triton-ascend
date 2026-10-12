@@ -1,0 +1,74 @@
+{
+  "schema_version": 2,
+  "name": "rank2-affine-memory-layout-closure-v1",
+  "target": "ascend950dt",
+  "bounds": {
+    "max_nodes": 16,
+    "max_rank": 2,
+    "max_operands": 3,
+    "max_results": 1,
+    "max_shape_symbols": 0,
+    "allow_dynamic_shapes": false,
+    "allow_control_flow": false,
+    "allow_effects": true
+  },
+  "catalog_dialects": ["arith", "tt"],
+  "operations": [
+    "ags.input",
+    "ags.memory",
+    "arith.addi",
+    "arith.constant",
+    "arith.muli",
+    "arith.negf",
+    "tt.addptr",
+    "tt.broadcast",
+    "tt.expand_dims",
+    "tt.load",
+    "tt.make_range",
+    "tt.splat",
+    "tt.store",
+    "tt.trans"
+  ],
+  "integer_bits": [],
+  "floating_bits": [],
+  "pointer_address_spaces": [],
+  "integer_constants": [2],
+  "tensor_shapes": [[1, 2], [1, 3], [2], [2, 1], [2, 3], [3], [3, 1], [3, 2]],
+  "explicit_types": [
+    "i32",
+    "!tt.ptr<f32>",
+    "tensor<2xi32>",
+    "tensor<3xi32>",
+    "tensor<2x1xi32>",
+    "tensor<1x2xi32>",
+    "tensor<3x1xi32>",
+    "tensor<1x3xi32>",
+    "tensor<2x3xi32>",
+    "tensor<3x2xi32>",
+    "tensor<2x3xf32>",
+    "tensor<3x2xf32>",
+    "tensor<2x3x!tt.ptr<f32>>",
+    "tensor<3x2x!tt.ptr<f32>>"
+  ],
+  "attribute_domains": {
+    "axis": [0, 1],
+    "load_segments_unmasked": [[1, 0, 0]],
+    "load_segments_masked": [[1, 1, 0]],
+    "load_segments_other": [[1, 1, 1]],
+    "range_end": [2, 3],
+    "range_start": [0],
+    "transpose_order": [[1, 0]]
+  },
+  "semantic_domains": [
+    "signature",
+    "shape",
+    "index",
+    "layout",
+    "value",
+    "definedness",
+    "effect",
+    "memory"
+  ]
+}
+
+

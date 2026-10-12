@@ -112,15 +112,12 @@ def _row_module(
     }}
 """
         store_value = "%out"
-    elif body == "for_pid_lower_bound":
-        post_load = f"""    %pid_index = arith.index_cast %pid : i32 to index
-    %for_step = arith.constant 1 : index
-    %for_ub = arith.constant 2 : index
-    %out = scf.for %i = %pid_index to %for_ub step %for_step iter_args(%acc = %value) -> (tensor<{width}xf32>) {{
-      scf.yield %acc : tensor<{width}xf32>
-    }}
+    elif body == "auto_overflow_assert":
+        post_load = f"""    %offsets64 = arith.extsi %offsets : tensor<{width}xi32> to tensor<{width}xi64>
+    %max_i32 = arith.constant dense<2147483647> : tensor<{width}xi64>
+    %within_i32 = arith.cmpi sle, %offsets64, %max_i32 : tensor<{width}xi64>
+    tt.assert %within_i32, "int32 overflow detected for operation add" {{tt.auto_overflow_assert}} : tensor<{width}xi1>
 """
-        store_value = "%out"
     elif body == "non_whitelisted_y_num_programs":
         post_load = "    %not_whitelisted = tt.get_num_programs y : i32\n"
     elif body != "copy":
@@ -264,15 +261,15 @@ def test_row_coalescing_clones_scf_for_with_lifted_iter_args(tmp_path):
     assert "scf.yield" in text
 
 
-def test_row_coalescing_declines_late_sandbox_failure_without_committing(tmp_path):
+def test_row_coalescing_lifts_automatic_overflow_assert(tmp_path):
     text = _run_row(
-        _row_module("row_late_sandbox_decline", 16, body="for_pid_lower_bound"),
+        _row_module("row_auto_overflow_assert", 16, body="auto_overflow_assert"),
         tmp_path,
     )
 
-    _assert_row_bailout(text)
-    assert "arith.index_cast" in text
-    assert "scf.for" in text
+    _assert_row_hit(text)
+    assert "tt.auto_overflow_assert" in text
+    assert "tensor<8x16xi1>" in text
 
 
 def test_row_coalescing_rejects_non_whitelisted_y_num_programs(tmp_path):

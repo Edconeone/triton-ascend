@@ -2627,18 +2627,20 @@ MatmulConverter::matchAndRewrite(triton::DotOp op, OpAdaptor adaptor,
   auto dstType = cast<RankedTensorType>(op.getType());
   auto elemTy = dstType.getElementType();
   auto inputPrec = op.getInputPrecision();
+  bool useHf32 = false;
   // Ascend does not support tf32;  map it to hf32 which provides similar
-  // functionality.HF32 is only valid for fp32 x fp32 inputs; for other
+  // functionality. HF32 is only valid for fp32 x fp32 inputs; for other
   // dtypes, fall back to ieee.
   if (inputPrec == InputPrecision::TF32) {
     op->emitWarning("Ascend does not support tf32; map it to hf32.");
-    inputPrec = InputPrecision::HF32;
+    inputPrec = InputPrecision::IEEE;
+    useHf32 = true;
   }
-  if (inputPrec == InputPrecision::HF32) {
+  if (useHf32) {
     auto opaElemTy = cast<RankedTensorType>(opa.getType()).getElementType();
     auto opbElemTy = cast<RankedTensorType>(opb.getType()).getElementType();
     if (!opaElemTy.isF32() || !opbElemTy.isF32()) {
-      inputPrec = InputPrecision::IEEE;
+      useHf32 = false;
     }
   }
   auto createOp = [&](auto &&rewriter, ValueRange operands,
@@ -2678,8 +2680,10 @@ MatmulConverter::matchAndRewrite(triton::DotOp op, OpAdaptor adaptor,
   } else {
     matmulOp = replaceOp(rewriter, ValueRange{opa, opb}, ValueRange{opc});
   }
-  matmulOp->setAttr("input_precision",
-                    rewriter.getStringAttr(stringifyInputPrecision(inputPrec)));
+  matmulOp->setAttr(
+      "input_precision",
+      rewriter.getStringAttr(useHf32 ? "hf32"
+                                     : stringifyInputPrecision(inputPrec)));
   return success();
 }
 

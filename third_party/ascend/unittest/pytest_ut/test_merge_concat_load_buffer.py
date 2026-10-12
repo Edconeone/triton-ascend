@@ -174,3 +174,36 @@ def test_cat_masked_load_1d(dtype, block, n_valid):
     cat_masked_load_1d_kernel[1, 1, 1](x.npu(), y.npu(), out_npu, n_valid, BLOCK=block, OTHER=other)
 
     test_common.validate_cmp(dtype, out_npu, ref)
+
+
+def test_cat_masked_load_rule_mask_ab(monkeypatch):
+    """Both sides of the all-vs-all-minus-P12 experiment stay equivalent."""
+    block = 128
+    n_valid = 93
+    other = -3.25
+    x = torch.arange(block, dtype=torch.float32).npu()
+    y = (torch.arange(block, dtype=torch.float32) + 1000).npu()
+    keep = torch.arange(block) < n_valid
+    pad = torch.full((block, ), other, dtype=torch.float32)
+    expected = torch.cat((torch.where(keep, x.cpu(), pad), torch.where(keep, y.cpu(), pad)))
+
+    outputs = {}
+    monkeypatch.setenv("TRITON_ALWAYS_COMPILE", "1")
+    for rule_mask in (4095, 3071):
+        monkeypatch.setenv("TRITON_ASCEND_GRAPH_EXPERIMENT_RULE_MASK", str(rule_mask))
+        cat_masked_load_1d_kernel.device_caches.clear()
+        output = torch.empty(2 * block, dtype=torch.float32, device="npu")
+        cat_masked_load_1d_kernel[1, 1, 1](
+            x,
+            y,
+            output,
+            n_valid,
+            BLOCK=block,
+            OTHER=other,
+            enable_graph_optimize=True,
+        )
+        torch.npu.synchronize()
+        outputs[rule_mask] = output.cpu()
+
+    torch.testing.assert_close(outputs[4095], expected, rtol=0, atol=0)
+    torch.testing.assert_close(outputs[3071], outputs[4095], rtol=0, atol=0)

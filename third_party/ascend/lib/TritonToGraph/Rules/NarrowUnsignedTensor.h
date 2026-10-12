@@ -7,6 +7,7 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/TypeUtilities.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
+#include <cstdint>
 
 namespace mlir::triton {
 namespace narrow_unsigned_tensor {
@@ -28,15 +29,53 @@ inline bool isU32(Value value) {
   return constant(value, bits) && bits <= UINT32_MAX;
 }
 
-inline Type i32Type(Type type, PatternRewriter &rewriter) {
+inline Type i32Type(Type type, RewriterBase &rewriter) {
   if (auto tensor = dyn_cast<RankedTensorType>(type))
     return tensor.clone(rewriter.getI32Type());
   return rewriter.getI32Type();
 }
 
+// Build a narrowed bitwise node while eliminating identities that generic
+// arith folding does not currently recognize for dense tensor splats.
+inline Value createBitwise(Operation *source, Value lhs, Value rhs,
+                           RewriterBase &rewriter, Location location) {
+  uint64_t lhsBits = 0;
+  uint64_t rhsBits = 0;
+  const bool lhsConstant = constant(lhs, lhsBits);
+  const bool rhsConstant = constant(rhs, rhsBits);
+
+  if (isa<arith::AndIOp>(source)) {
+    if (lhsConstant && lhsBits == UINT32_MAX)
+      return rhs;
+    if (rhsConstant && rhsBits == UINT32_MAX)
+      return lhs;
+    if (lhsConstant && lhsBits == 0)
+      return lhs;
+    if (rhsConstant && rhsBits == 0)
+      return rhs;
+    return rewriter.createOrFold<arith::AndIOp>(location, lhs, rhs);
+  }
+  if (isa<arith::OrIOp>(source)) {
+    if (lhsConstant && lhsBits == 0)
+      return rhs;
+    if (rhsConstant && rhsBits == 0)
+      return lhs;
+    if (lhsConstant && lhsBits == UINT32_MAX)
+      return lhs;
+    if (rhsConstant && rhsBits == UINT32_MAX)
+      return rhs;
+    return rewriter.createOrFold<arith::OrIOp>(location, lhs, rhs);
+  }
+  if (lhsConstant && lhsBits == 0)
+    return rhs;
+  if (rhsConstant && rhsBits == 0)
+    return lhs;
+  return rewriter.createOrFold<arith::XOrIOp>(location, lhs, rhs);
+}
+
 // Compute the low 32 bits without materializing wide bitwise temporaries.
 // Truncation commutes with these operations, but not with right shift.
-inline Value lowBits(Value value, PatternRewriter &rewriter,
+inline Value lowBits(Value value, RewriterBase &rewriter,
                      unsigned depth = 0) {
   Location loc = value.getLoc();
   Type type = i32Type(value.getType(), rewriter);
@@ -63,88 +102,36 @@ inline Value lowBits(Value value, PatternRewriter &rewriter,
           loc, type, lowBits(op.getSrc(), rewriter, depth + 1));
     Operation *op = value.getDefiningOp();
     if (op && isa<arith::AndIOp, arith::OrIOp, arith::XOrIOp>(op)) {
+      uint64_t lhsBits = 0;
+      uint64_t rhsBits = 0;
+      const bool lhsConstant = constant(op->getOperand(0), lhsBits);
+      const bool rhsConstant = constant(op->getOperand(1), rhsBits);
+      const uint64_t lhsLowBits = lhsBits & UINT32_MAX;
+      const uint64_t rhsLowBits = rhsBits & UINT32_MAX;
+      if (isa<arith::AndIOp>(op)) {
+        if (lhsConstant && lhsLowBits == UINT32_MAX)
+          return lowBits(op->getOperand(1), rewriter, depth + 1);
+        if (rhsConstant && rhsLowBits == UINT32_MAX)
+          return lowBits(op->getOperand(0), rewriter, depth + 1);
+      } else if (isa<arith::OrIOp>(op)) {
+        if (lhsConstant && lhsLowBits == 0)
+          return lowBits(op->getOperand(1), rewriter, depth + 1);
+        if (rhsConstant && rhsLowBits == 0)
+          return lowBits(op->getOperand(0), rewriter, depth + 1);
+      } else {
+        if (lhsConstant && lhsLowBits == 0)
+          return lowBits(op->getOperand(1), rewriter, depth + 1);
+        if (rhsConstant && rhsLowBits == 0)
+          return lowBits(op->getOperand(0), rewriter, depth + 1);
+      }
       Value lhs = lowBits(op->getOperand(0), rewriter, depth + 1);
       Value rhs = lowBits(op->getOperand(1), rewriter, depth + 1);
-      if (isa<arith::AndIOp>(op))
-        return rewriter.create<arith::AndIOp>(loc, lhs, rhs);
-      if (isa<arith::OrIOp>(op))
-        return rewriter.create<arith::OrIOp>(loc, lhs, rhs);
-      return rewriter.create<arith::XOrIOp>(loc, lhs, rhs);
+      return createBitwise(op, lhs, rhs, rewriter, loc);
     }
   }
   return rewriter.create<arith::TruncIOp>(loc, type, value);
 }
 
-struct Narrow : RewritePattern {
-  explicit Narrow(MLIRContext *context)
-      : RewritePattern(MatchAnyOpTypeTag(), 1, context) {}
-
-  LogicalResult matchAndRewrite(Operation *op,
-                                PatternRewriter &rewriter) const override {
-    if (op->getNumResults() != 1 || op->getNumOperands() < 2)
-      return failure();
-    auto type = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
-    // Select has a predicate operand first.
-    if (isa<arith::SelectOp>(op))
-      type = dyn_cast<RankedTensorType>(op->getResult(0).getType());
-    if (!type || !type.getElementType().isInteger(64))
-      return failure();
-    Location loc = op->getLoc();
-    Value result;
-    if (auto select = dyn_cast<arith::SelectOp>(op)) {
-      if (!isU32(select.getTrueValue()) || !isU32(select.getFalseValue()))
-        return failure();
-      result = rewriter.create<arith::SelectOp>(
-          loc, select.getCondition(), lowBits(select.getTrueValue(), rewriter),
-          lowBits(select.getFalseValue(), rewriter));
-    } else if (isa<arith::AndIOp, arith::OrIOp, arith::XOrIOp>(op)) {
-      Value lhs = op->getOperand(0), rhs = op->getOperand(1);
-      uint64_t mask;
-      bool masked = isa<arith::AndIOp>(op) &&
-                    ((constant(lhs, mask) && mask <= UINT32_MAX) ||
-                     (constant(rhs, mask) && mask <= UINT32_MAX));
-      if (!masked && !(isU32(lhs) && isU32(rhs)))
-        return failure();
-      result = lowBits(op->getResult(0), rewriter);
-    } else if (isa<arith::ShRSIOp, arith::ShRUIOp>(op)) {
-      uint64_t shift;
-      if (!isU32(op->getOperand(0)) || !constant(op->getOperand(1), shift) ||
-          shift >= 32)
-        return failure();
-      result = rewriter.create<arith::ShRUIOp>(
-          loc, lowBits(op->getOperand(0), rewriter),
-          lowBits(op->getOperand(1), rewriter));
-    } else if (auto cmp = dyn_cast<arith::CmpIOp>(op)) {
-      if (cmp.getPredicate() != arith::CmpIPredicate::eq ||
-          !isU32(cmp.getLhs()))
-        return failure();
-      if (isU32(cmp.getRhs())) {
-        rewriter.replaceOpWithNewOp<arith::CmpIOp>(
-            op, cmp.getPredicate(), lowBits(cmp.getLhs(), rewriter),
-            lowBits(cmp.getRhs(), rewriter));
-        return success();
-      }
-      // A scalar threshold may still be i64: keep its upper-bit check scalar,
-      // instead of silently truncating or creating a tensor<i64> comparison.
-      auto splat = cmp.getRhs().getDefiningOp<SplatOp>();
-      if (!splat)
-        return failure();
-      Value limit = rewriter.create<arith::ConstantIntOp>(loc, UINT32_MAX, 64);
-      Value fits = rewriter.create<arith::CmpIOp>(
-          loc, arith::CmpIPredicate::ule, splat.getSrc(), limit);
-      Value equal = rewriter.create<arith::CmpIOp>(
-          loc, arith::CmpIPredicate::eq, lowBits(cmp.getLhs(), rewriter),
-          lowBits(cmp.getRhs(), rewriter));
-      Value fitsTensor = rewriter.create<SplatOp>(loc, equal.getType(), fits);
-      rewriter.replaceOpWithNewOp<arith::AndIOp>(op, equal, fitsTensor);
-      return success();
-    } else {
-      return failure();
-    }
-    rewriter.replaceOpWithNewOp<arith::ExtUIOp>(op, type, result);
-    return success();
-  }
-};
 } // namespace narrow_unsigned_tensor
 } // namespace mlir::triton
 #endif

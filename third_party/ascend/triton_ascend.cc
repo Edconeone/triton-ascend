@@ -168,8 +168,12 @@ void init_triton_ascend_passes_ttir(py::module &&m) {
   m.def(
       "add_graph_optimize",
       [](mlir::PassManager &pm, std::uint64_t ruleMask,
+         std::uint64_t narrowUnsignedRuleMask,
          std::uint64_t maxRewritesPerFunction, std::uint64_t ubCapacityBytes,
-         const std::string &compileMode, bool compileOn91095) {
+         const std::string &compileMode, bool compileOn91095,
+         std::uint64_t maxAutoGraphOnlineMilliseconds,
+         const std::string &autoGraphRuleDatabase,
+         bool allowOnlineSemanticEnumeration) {
         if (ruleMask > std::numeric_limits<std::uint16_t>::max())
           throw py::value_error("rule_mask must fit in uint16_t");
         if (maxRewritesPerFunction > std::numeric_limits<unsigned>::max())
@@ -177,35 +181,19 @@ void init_triton_ascend_passes_ttir(py::module &&m) {
               "max_rewrites_per_function must fit in unsigned");
         if (ubCapacityBytes > std::numeric_limits<unsigned>::max())
           throw py::value_error("ub_capacity_bytes must fit in unsigned");
-        if (mappingUBCapacityBytes > std::numeric_limits<unsigned>::max())
+        if (maxAutoGraphOnlineMilliseconds >
+            std::numeric_limits<unsigned>::max())
           throw py::value_error(
-              "mapping_ub_capacity_bytes must fit in unsigned");
-        if (storeCoalescingUBBudgetBytes > std::numeric_limits<unsigned>::max())
+              "max_auto_graph_online_ms must fit in unsigned");
+        if (narrowUnsignedRuleMask >
+            std::numeric_limits<std::uint8_t>::max())
           throw py::value_error(
-              "store_coalescing_ub_budget_bytes must fit in unsigned");
-        if (ubSafetyPercent == 0 || ubSafetyPercent > 100 ||
-            ubSafetyPercent > std::numeric_limits<unsigned>::max())
-          throw py::value_error(
-              "ub_safety_percent must be an unsigned value in [1, 100]");
-        const std::uint64_t effectiveMappingUBCapacity =
-            mappingUBCapacityBytes ? mappingUBCapacityBytes : ubCapacityBytes;
-        if (reservedUBBytes > std::numeric_limits<unsigned>::max() ||
-            reservedUBBytes > effectiveMappingUBCapacity)
-          throw py::value_error("reserved_ub_bytes must fit in unsigned and "
-                                "not exceed mapping UB");
-        if (mappingL0ACapacityBytes > std::numeric_limits<unsigned>::max() ||
-            mappingL0BCapacityBytes > std::numeric_limits<unsigned>::max() ||
-            mappingL0CCapacityBytes > std::numeric_limits<unsigned>::max())
-          throw py::value_error("mapping L0 capacities must fit in unsigned");
-        if (l0SafetyPercent == 0 || l0SafetyPercent > 100 ||
-            l0SafetyPercent > std::numeric_limits<unsigned>::max())
-          throw py::value_error(
-              "l0_safety_percent must be an unsigned value in [1, 100]");
-        if (coreNum > std::numeric_limits<unsigned>::max())
-          throw py::value_error("core_num must fit in unsigned");
+              "narrow_unsigned_rule_mask must fit in uint8_t");
 
         mlir::triton::cfg::GraphOptimizationOptions options;
-        options.enabledRuleMask = graphRuleMask;
+        options.enabledRuleMask = static_cast<std::uint16_t>(ruleMask);
+        options.enabledNarrowUnsignedRuleMask =
+            static_cast<std::uint8_t>(narrowUnsignedRuleMask);
         options.maxRewritesPerFunction =
             static_cast<unsigned>(maxRewritesPerFunction);
         options.ubCapacityBytes = static_cast<unsigned>(ubCapacityBytes);
@@ -225,15 +213,22 @@ void init_triton_ascend_passes_ttir(py::module &&m) {
         options.coreNum = static_cast<unsigned>(coreNum);
         options.compileMode = compileMode;
         options.compileOn91095 = compileOn91095;
+        options.maxAutoGraphOnlineMilliseconds =
+            static_cast<unsigned>(maxAutoGraphOnlineMilliseconds);
+        options.autoGraphRuleDatabase = autoGraphRuleDatabase;
+        options.allowOnlineSemanticEnumeration =
+            allowOnlineSemanticEnumeration;
         pm.addPass(mlir::triton::cfg::createGraphOptimizePass(options));
       },
-      py::arg("pm"),
-      py::arg("rule_mask") = static_cast<std::uint64_t>(
-          mlir::triton::cfg::kDefaultGraphOptimizationRuleMask),
+      py::arg("pm"), py::arg("rule_mask") = 4095,
+      py::arg("narrow_unsigned_rule_mask") = 15,
       py::arg("max_rewrites_per_function") = 64,
       py::arg("ub_capacity_bytes") = 0,
       py::arg("compile_mode") = "simd_simt_template",
-      py::arg("compile_on_910_95") = false);
+      py::arg("compile_on_910_95") = false,
+      py::arg("max_auto_graph_online_ms") = 0,
+      py::arg("auto_graph_rule_database") = "",
+      py::arg("allow_online_semantic_enumeration") = false);
 
   m.def("set_buffer_count", [](mlir::ModuleOp &module, const std::string &type,
                                int count) {

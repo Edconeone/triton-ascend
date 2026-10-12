@@ -1,4 +1,5 @@
 // RUN: triton-opt --verify-each %s -graph-optimize='rule-mask=2' -o - | FileCheck %s
+// RUN: triton-opt --verify-each %s -graph-optimize='rule-mask=4093' -o - | FileCheck %s --check-prefix=P05-OFF
 
 // This is deliberately pre-layout TTIR. A direct tt.trans -> pointwise ->
 // tt.dot chain is valid before GPU layouts are assigned; once GPU encodings
@@ -23,6 +24,11 @@ module {
   // CHECK-NEXT: %[[A_BITCAST:.*]] = arith.bitcast %[[A_TRUNC]] : tensor<8x16xf16> to tensor<8x16xi16>
   // CHECK-NEXT: %[[A_TRANS:.*]] = tt.trans %[[A_BITCAST]] {order = array<i32: 1, 0>} : tensor<8x16xi16> -> tensor<16x8xi16>
   // CHECK-NEXT: %[[A_DOT:.*]] = tt.dot %[[A_TRANS]], %[[A_B]], %[[A_C]] : tensor<16x8xi16> * tensor<8x16xi16> -> tensor<16x16xi32>
+  // P05-OFF-LABEL: tt.func @positive_a_truncf_bitcast(
+  // P05-OFF: %[[A_TRANS_OFF:.*]] = tt.trans %{{.*}} {order = array<i32: 1, 0>} : tensor<8x16xf32> -> tensor<16x8xf32>
+  // P05-OFF-NEXT: %[[A_TRUNC_OFF:.*]] = arith.truncf %[[A_TRANS_OFF]] : tensor<16x8xf32> to tensor<16x8xf16>
+  // P05-OFF-NEXT: %[[A_BITCAST_OFF:.*]] = arith.bitcast %[[A_TRUNC_OFF]] : tensor<16x8xf16> to tensor<16x8xi16>
+  // P05-OFF-NEXT: tt.dot %[[A_BITCAST_OFF]], {{.*}} : tensor<16x8xi16> * tensor<8x16xi16> -> tensor<16x16xi32>
   tt.func @positive_a_truncf_bitcast(
       %a_src: tensor<8x16xf32>,
       %b: tensor<8x16xi16>,

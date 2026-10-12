@@ -64,11 +64,14 @@ public:
   }
 };
 
-class GraphOptimizationRule {
+// A provider contributes rewrite alternatives to the shared candidate pool.
+// It need not correspond to one hand-written rule: AutoGraphSolver is a
+// provider whose individual plans are discovered from the executable TTIR
+// language and carry their own compatibility rule identity.
+class GraphOptimizationProvider {
 public:
-  virtual ~GraphOptimizationRule() = default;
+  virtual ~GraphOptimizationProvider() = default;
 
-  virtual GraphOptimizationRuleId getId() const = 0;
   virtual AnalysisRequirement getAnalysisRequirements() const = 0;
 
   // Candidate discovery may inspect analyses but must not mutate IR.
@@ -77,11 +80,20 @@ public:
                  SmallVectorImpl<std::unique_ptr<RewritePlan>> &plans) = 0;
 };
 
-// Internal extension point for the builtin rule set. Concrete rules receive a
-// stable copy of the pass options when they are constructed.
-void populateBuiltinGraphOptimizationRules(
+// Manual graph rules remain providers with a stable identity. The identity is
+// intentionally absent from GraphOptimizationProvider so the generic solver
+// adapter is not forced to masquerade as one legacy rule.
+class GraphOptimizationRule : public GraphOptimizationProvider {
+public:
+  ~GraphOptimizationRule() override = default;
+  virtual GraphOptimizationRuleId getId() const = 0;
+};
+
+// Internal extension point for all candidate providers. Concrete providers
+// receive a stable copy of the pass options when they are constructed.
+void populateBuiltinGraphOptimizationProviders(
     const GraphOptimizationOptions &options,
-    SmallVectorImpl<std::unique_ptr<GraphOptimizationRule>> &rules);
+    SmallVectorImpl<std::unique_ptr<GraphOptimizationProvider>> &providers);
 
 struct ReservedGraphOptimizationRuleOptions {
   GraphOptimizationRuleId id;
@@ -99,28 +111,17 @@ createStoreCoalescingRule(unsigned ubCapacityBytes,
 std::unique_ptr<GraphOptimizationRule>
 createRowCoalescingRule(bool enableLegacy = true);
 std::unique_ptr<GraphOptimizationRule> createDiagonalMaskRemovalRule();
-std::unique_ptr<GraphOptimizationRule> createConvertModuloToMaskRule();
-std::unique_ptr<GraphOptimizationRule> createSelectedBlockScanRule();
-
-std::unique_ptr<GraphOptimizationRule> createIndependentAxisTensorizeRule(
-    const IndependentAxisTensorizeRuleOptions &options);
-std::unique_ptr<GraphOptimizationRule> createPersistentTaskStripMiningRule(
-    const PersistentTaskStripMiningRuleOptions &options);
-
-LogicalResult materializePersistentTaskStripMiningCandidate(
-    ModuleOp module, triton::FuncOp function, const ResourceSnapshot &resources,
-    unsigned requestedBlockT, CandidateEvaluation *evaluation = nullptr,
-    bool deferIntermediateResourceRejection = false);
-std::unique_ptr<GraphOptimizationRule> createResidentLoadForwardingRule(
-    const ResidentLoadForwardingRuleOptions &options);
 std::unique_ptr<GraphOptimizationRule>
-createIntermediatePrecisionBoundaryElisionRule(
-    const IntermediatePrecisionBoundaryElisionRuleOptions &options);
-std::unique_ptr<GraphOptimizationRule> createStoreCoveragePlanningRule(
-    const StoreCoveragePlanningRuleOptions &options);
-std::unique_ptr<GraphOptimizationRule> createContiguousBlockAccessFormationRule(
-    const ContiguousBlockAccessFormationRuleOptions &options);
-std::unique_ptr<GraphOptimizationRule> createQueryRowBatchingRule();
+createDiagonalMaskRemovalRuleForAutoGraphSolver();
+std::unique_ptr<GraphOptimizationRule> createConvertModuloToMaskRule();
+// Transitional AGS-owned wrapper for the modulo-to-mask proof.  The
+// declarative candidate language does not yet materialize this cross-operation
+// address rewrite, so AutoGraphSolver can reuse the same checked proof while
+// keeping the AutoGraphSolver rule identity and mask independent from P04.
+std::unique_ptr<GraphOptimizationRule>
+createConvertModuloToMaskRuleForAutoGraphSolver();
+std::unique_ptr<GraphOptimizationProvider>
+createAutoGraphSolverAdapter(const GraphOptimizationOptions &options);
 
 } // namespace cfg
 } // namespace triton

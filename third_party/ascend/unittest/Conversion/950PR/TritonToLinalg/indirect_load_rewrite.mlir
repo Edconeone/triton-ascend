@@ -5,6 +5,10 @@
 // RUN:                --triton-to-unstructure='compile-on-910-95=true compile-mode=simd_simt_template' \
 // RUN:                --triton-to-linalg='compile-on-910-95=true compile-mode=simd_simt_template' --split-input-file 2>&1 \
 // RUN: | FileCheck %s --check-prefix=SLS-INSPECT
+// RUN: triton-opt %s --graph-optimize='rule-mask=4031' \
+// RUN:                --triton-to-unstructure='compile-on-910-95=true compile-mode=simd_simt_template' \
+// RUN:                --triton-to-linalg='compile-on-910-95=true compile-mode=simd_simt_template' --split-input-file \
+// RUN: | FileCheck %s --check-prefix=SLS-OFF
 
 // The static stride-4 AddPtr below is deliberately inspected but cannot be
 // converted to an indirect load.  The trace locks down the original greedy
@@ -63,6 +67,9 @@ module attributes {hacc.target = #hacc.target<"Ascend950PR_9579">} {
 // CHECK-LABEL: func.func @addptr_stride4_masked_single_tile
 // CHECK-SAME: parallel_mode = "mix_simd_simt"
 // CHECK: call @triton_indirect_load(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) {isVolatile = false} : (memref<?xf16>, tensor<1024xi64>, tensor<1024xi1>, tensor<1024xf16>) -> tensor<1024xf16>
+// SLS-OFF-LABEL: func.func @addptr_stride4_masked_single_tile
+// SLS-OFF-NOT: call @triton_indirect_load
+// SLS-OFF: memref.copy
 module attributes {hacc.target = #hacc.target<"Ascend950PR_9579">} {
   tt.func public @addptr_stride4_masked_single_tile(%arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32},
                                                     %arg1: !tt.ptr<f16> {tt.divisibility = 16 : i32}) {

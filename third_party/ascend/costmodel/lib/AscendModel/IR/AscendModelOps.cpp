@@ -15,6 +15,8 @@
 #include "mlir/IR/TypeUtilities.h"
 #include "llvm/ADT/STLExtras.h"
 
+#include <algorithm>
+
 using namespace mlir;
 using namespace mlir::ascend;
 
@@ -476,4 +478,57 @@ int64_t SelectOp::estimateCycles(const HardwareConfig &config) {
 HWUnit SelectOp::getHWUnit() { return HWUnit::Vector; }
 int64_t SelectOp::getFlops() {
   return getNumElementsFromType(getResult().getType());
+}
+
+//===----------------------------------------------------------------------===//
+// HistogramOp
+//===----------------------------------------------------------------------===//
+
+int64_t HistogramOp::estimateCycles(const HardwareConfig &config) {
+  // Histogram is executed by the AIV/SIMT path on 950DT.  Model one lane
+  // classification/update per source element plus result-bin retirement.
+  int64_t sourceElements = getNumElementsFromType(getInput().getType());
+  int64_t bins = getNumElementsFromType(getResult().getType());
+  int bits = getElementBitsFromType(getInput().getType());
+  int64_t cycles = estimateVectorCycles(
+      sourceElements + bins, 1, bits, config.getVectorStartupLatency());
+  if (getMask()) {
+    // On 950DT the masked form performs predicate filtering and masked-lane
+    // dispatch before the histogram update.  Charge two vector-equivalent
+    // passes.  This lets StageModel compare it with the independently
+    // enumerated select-to-out-of-range parking form instead of letting node
+    // count always choose the masked form.  The factor is target costing, not
+    // a FoldHistogramParking rewrite rule.
+    cycles += estimateVectorCycles(sourceElements, 2, bits,
+                                   config.getVectorStartupLatency());
+  }
+  return cycles;
+}
+HWUnit HistogramOp::getHWUnit() { return HWUnit::Vector; }
+int64_t HistogramOp::getFlops() {
+  return getNumElementsFromType(getInput().getType());
+}
+
+//===----------------------------------------------------------------------===//
+// ScanOp
+//===----------------------------------------------------------------------===//
+
+int64_t ScanOp::estimateCycles(const HardwareConfig &config) {
+  auto inputType = cast<RankedTensorType>(getInput().getType());
+  int64_t axis = (*this)->getAttrOfType<IntegerAttr>("axis").getInt();
+  int64_t axisElements = inputType.isDynamicDim(axis)
+                             ? 1024
+                             : inputType.getDimSize(axis);
+  int64_t stages = 0;
+  for (int64_t width = axisElements; width > 1; width = (width + 1) / 2)
+    ++stages;
+  stages = std::max<int64_t>(stages, 1);
+  int64_t elements = getNumElementsFromType(inputType);
+  int bits = getElementBitsFromType(inputType);
+  return estimateVectorCycles(elements, stages, bits,
+                              config.getVectorStartupLatency());
+}
+HWUnit ScanOp::getHWUnit() { return HWUnit::Vector; }
+int64_t ScanOp::getFlops() {
+  return getNumElementsFromType(getInput().getType());
 }

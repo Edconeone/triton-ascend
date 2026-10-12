@@ -20,6 +20,8 @@
  * THE SOFTWARE.
  */
 
+#include "TritonToGraph/GraphOptimization.h"
+#include "TritonToGraph/AutoGraphSolverPipeline.h"
 #include "TritonToGraph/Passes.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -38,6 +40,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Debug.h"
 
+#include <cstddef>
 #include <limits>
 
 #define DEBUG_TYPE "merge-concat-load-buffer"
@@ -55,6 +58,12 @@ using namespace mlir;
 using namespace mlir::triton::cfg;
 
 namespace {
+
+static std::size_t countInsertSlices(ModuleOp moduleOp) {
+  std::size_t count = 0;
+  moduleOp.walk([&](tensor::InsertSliceOp) { ++count; });
+  return count;
+}
 
 //===----------------------------------------------------------------------===//
 // OpFoldResult / box geometry
@@ -562,10 +571,57 @@ struct MergeConcatLoadBufferPass
   }
 
   void runOnOperation() override {
+    ModuleOp module = getOperation();
+    const bool autoEnabled = isGraphOptimizationRuleEnabled(
+        module, GraphOptimizationRuleId::AutoGraphSolver);
+    const bool manualEnabled = isGraphOptimizationRuleEnabled(
+        module, GraphOptimizationRuleId::MergeConcatLoadBuffer);
+    if (!autoEnabled && !manualEnabled)
+      return;
+
+    if (autoEnabled) {
+      GraphOptimizationOptions options;
+      options.enabledRuleMask = getModuleGraphOptimizationRuleMask(module);
+      if (auto path = module->getAttrOfType<StringAttr>(
+              kAutoGraphRuleDatabaseAttrName))
+        options.autoGraphRuleDatabase = path.getValue().str();
+      if (auto budget = module->getAttrOfType<IntegerAttr>(
+              kAutoGraphOnlineBudgetAttrName))
+        options.maxAutoGraphOnlineMilliseconds =
+            static_cast<unsigned>(budget.getInt());
+      if (auto budget = module->getAttrOfType<IntegerAttr>(
+              kAutoGraphRewriteBudgetAttrName))
+        options.maxRewritesPerFunction =
+            static_cast<unsigned>(budget.getInt());
+      if (auto target = module->getAttrOfType<BoolAttr>(
+              kAutoGraphTarget91095AttrName))
+        options.compileOn91095 = target.getValue();
+      if (failed(applyAutoGraphSolverDatabase(module, options))) {
+        signalPassFailure();
+        return;
+      }
+    }
+
+    if (!manualEnabled)
+      return;
+
+    const std::size_t insertSlicesBefore = countInsertSlices(module);
     RewritePatternSet patterns(&getContext());
     patterns.add<MergeConcatLoadBufferPattern>(&getContext());
-    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
+    if (failed(applyPatternsGreedily(module, std::move(patterns)))) {
       signalPassFailure();
+      return;
+    }
+    if (countInsertSlices(module) < insertSlicesBefore)
+      LLVM_DEBUG(
+          llvm::dbgs()
+          << "[graph-optimize] applied graph optimization rule "
+          << static_cast<unsigned>(
+                 GraphOptimizationRuleId::MergeConcatLoadBuffer)
+          << " ("
+          << getGraphOptimizationRuleName(
+                 GraphOptimizationRuleId::MergeConcatLoadBuffer)
+          << ")\n");
   }
 };
 

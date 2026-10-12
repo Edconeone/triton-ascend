@@ -1,0 +1,2 @@
+# Keep Ascend backend text sources stable across Windows and Linux checkouts.
+third_party/ascend/** text=auto eol=lf

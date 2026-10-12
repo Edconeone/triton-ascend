@@ -434,11 +434,12 @@ void eraseDeadPatternOp(IRRewriter &rewriter, Operation *op) {
 
 class DiagonalMaskRemovalPlan final : public RewritePlan {
 public:
-  DiagonalMaskRemovalPlan(DiagonalCandidate candidate, unsigned epoch)
-      : candidate(candidate), epoch(epoch) {}
+  DiagonalMaskRemovalPlan(DiagonalCandidate candidate, unsigned epoch,
+                          GraphOptimizationRuleId ruleId)
+      : candidate(candidate), epoch(epoch), ruleId(ruleId) {}
 
   GraphOptimizationRuleId getRuleId() const override {
-    return GraphOptimizationRuleId::DiagonalMaskRemoval;
+    return ruleId;
   }
 
   // Larger intermediates are worth collapsing first.
@@ -503,12 +504,18 @@ public:
 private:
   DiagonalCandidate candidate;
   unsigned epoch;
+  GraphOptimizationRuleId ruleId;
 };
 
 class DiagonalMaskRemovalRule final : public GraphOptimizationRule {
 public:
+  explicit DiagonalMaskRemovalRule(
+      GraphOptimizationRuleId planId =
+          GraphOptimizationRuleId::DiagonalMaskRemoval)
+      : planId(planId) {}
+
   GraphOptimizationRuleId getId() const override {
-    return GraphOptimizationRuleId::DiagonalMaskRemoval;
+    return planId;
   }
 
   AnalysisRequirement getAnalysisRequirements() const override {
@@ -527,15 +534,24 @@ public:
                    << getGraphOptimizationRuleName(getId()) << ") at "
                    << reduce.getLoc() << "\n");
         plans.push_back(std::make_unique<DiagonalMaskRemovalPlan>(
-            *candidate, context.getEpoch()));
+            *candidate, context.getEpoch(), planId));
       }
     });
     return success();
   }
+
+private:
+  GraphOptimizationRuleId planId;
 };
 
 } // namespace
 
 std::unique_ptr<GraphOptimizationRule> cfg::createDiagonalMaskRemovalRule() {
   return std::make_unique<DiagonalMaskRemovalRule>();
+}
+
+std::unique_ptr<GraphOptimizationRule>
+cfg::createDiagonalMaskRemovalRuleForAutoGraphSolver() {
+  return std::make_unique<DiagonalMaskRemovalRule>(
+      GraphOptimizationRuleId::AutoGraphSolver);
 }

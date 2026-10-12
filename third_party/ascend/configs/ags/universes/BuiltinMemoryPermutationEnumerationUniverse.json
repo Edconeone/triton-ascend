@@ -1,0 +1,54 @@
+{
+  "schema_version": 2,
+  "name": "tensor-memory-permutation-closure-v1",
+  "target": "ascend950dt",
+  "bounds": {
+    "max_nodes": 3,
+    "max_rank": 2,
+    "max_operands": 4,
+    "max_results": 1,
+    "max_shape_symbols": 0,
+    "allow_dynamic_shapes": false,
+    "allow_control_flow": false,
+    "allow_effects": true
+  },
+  "catalog_dialects": ["arith", "tt"],
+  "operations": [
+    "ags.input",
+    "ags.memory",
+    "arith.constant",
+    "tt.load",
+    "tt.store",
+    "tt.trans"
+  ],
+  "integer_bits": [1, 32],
+  "floating_bits": [32],
+  "pointer_address_spaces": [1],
+  "integer_constants": [0, 1],
+  "tensor_shapes": [
+    [2, 3],
+    [3, 2],
+    [8, 32],
+    [32, 8],
+    [8, 64],
+    [64, 8]
+  ],
+  "attribute_domains": {
+    "load_segments_unmasked": [[1, 0, 0]],
+    "load_segments_masked": [[1, 1, 0]],
+    "load_segments_other": [[1, 1, 1]],
+    "transpose_order": [[1, 0]]
+  },
+  "semantic_domains": [
+    "signature",
+    "shape",
+    "index",
+    "layout",
+    "value",
+    "definedness",
+    "effect",
+    "memory"
+  ]
+}
+
+

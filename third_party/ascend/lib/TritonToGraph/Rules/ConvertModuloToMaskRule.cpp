@@ -170,6 +170,47 @@ bool crossesNestedCarriedFor(ArrayRef<Operation *> carriedForChain,
   });
 }
 
+bool isAutomaticOverflowAssert(triton::AssertOp assertOp) {
+  if (!assertOp || !assertOp->hasAttr("tt.auto_overflow_assert"))
+    return false;
+  auto message = dyn_cast<StringAttr>(assertOp.getMessageAttr());
+  return message &&
+         message.getValue().contains("overflow detected for operation");
+}
+
+// sanitize_overflow builds a pure side graph from an address component to a
+// marked tt.assert. Replacing the wrapped component with its linear form must
+// update that proof graph too, but it must not make the modulo observable and
+// block the address rewrite. User assertions and all other side consumers stay
+// strict rejection boundaries.
+bool onlyFeedsAutomaticOverflowAsserts(Value value,
+                                       SmallPtrSetImpl<Value> &visited) {
+  if (!visited.insert(value).second)
+    return true;
+  if (value.use_empty())
+    return false;
+
+  for (OpOperand &use : value.getUses()) {
+    Operation *user = use.getOwner();
+    if (auto assertOp = dyn_cast<triton::AssertOp>(user)) {
+      if (assertOp.getCondition() != value ||
+          !isAutomaticOverflowAssert(assertOp))
+        return false;
+      continue;
+    }
+    if (!isa<arith::ExtSIOp, arith::ExtUIOp, arith::TruncIOp,
+             arith::AddIOp, arith::SubIOp, arith::MulIOp, arith::CmpIOp,
+             arith::AndIOp, arith::OrIOp, arith::XOrIOp, triton::SplatOp,
+             triton::BroadcastOp, triton::ExpandDimsOp>(user) ||
+        user->getNumResults() == 0)
+      return false;
+    for (Value result : user->getResults())
+      if (!onlyFeedsAutomaticOverflowAsserts(result, visited))
+        return false;
+  }
+  return true;
+}
+
 // Walks forward from the modulo result and collects the loads it addresses.
 // Returns false as soon as the value reaches anything else, which is what makes
 // dropping the wrap unobservable: no other consumer can see the widened index.
@@ -233,6 +274,20 @@ bool collectAddressedLoads(Value value, SmallPtrSetImpl<Value> &visited,
                                  nextChain))
         return false;
       continue;
+    }
+
+    if (auto assertOp = dyn_cast<triton::AssertOp>(user)) {
+      if (assertOp.getCondition() == value &&
+          isAutomaticOverflowAssert(assertOp))
+        continue;
+      return false;
+    }
+    if (user->getNumResults() > 0) {
+      SmallPtrSet<Value, 16> overflowVisited;
+      if (llvm::all_of(user->getResults(), [&](Value result) {
+            return onlyFeedsAutomaticOverflowAsserts(result, overflowVisited);
+          }))
+        continue;
     }
 
     return false;
@@ -489,11 +544,12 @@ LogicalResult applyCandidate(IRRewriter &rewriter,
 
 class ConvertModuloToMaskPlan final : public RewritePlan {
 public:
-  ConvertModuloToMaskPlan(ModuloCandidate candidate, unsigned epoch)
-      : candidate(std::move(candidate)), epoch(epoch) {}
+  ConvertModuloToMaskPlan(ModuloCandidate candidate, unsigned epoch,
+                          GraphOptimizationRuleId ruleId)
+      : candidate(std::move(candidate)), epoch(epoch), ruleId(ruleId) {}
 
   GraphOptimizationRuleId getRuleId() const override {
-    return GraphOptimizationRuleId::ConvertModuloToMask;
+    return ruleId;
   }
 
   // Every load that stops wrapping can become a contiguous transfer.
@@ -525,12 +581,18 @@ public:
 private:
   ModuloCandidate candidate;
   unsigned epoch;
+  GraphOptimizationRuleId ruleId;
 };
 
 class ConvertModuloToMaskRule final : public GraphOptimizationRule {
 public:
+  explicit ConvertModuloToMaskRule(
+      GraphOptimizationRuleId planId =
+          GraphOptimizationRuleId::ConvertModuloToMask)
+      : planId(planId) {}
+
   GraphOptimizationRuleId getId() const override {
-    return GraphOptimizationRuleId::ConvertModuloToMask;
+    return planId;
   }
 
   AnalysisRequirement getAnalysisRequirements() const override {
@@ -552,15 +614,24 @@ public:
                    << " tileSize=" << candidate->tileSize
                    << " maskedLoads=" << candidate->loads.size() << "\n");
         plans.push_back(std::make_unique<ConvertModuloToMaskPlan>(
-            std::move(*candidate), context.getEpoch()));
+            std::move(*candidate), context.getEpoch(), planId));
       }
     });
     return success();
   }
+
+private:
+  GraphOptimizationRuleId planId;
 };
 
 } // namespace
 
 std::unique_ptr<GraphOptimizationRule> cfg::createConvertModuloToMaskRule() {
   return std::make_unique<ConvertModuloToMaskRule>();
+}
+
+std::unique_ptr<GraphOptimizationRule>
+cfg::createConvertModuloToMaskRuleForAutoGraphSolver() {
+  return std::make_unique<ConvertModuloToMaskRule>(
+      GraphOptimizationRuleId::AutoGraphSolver);
 }

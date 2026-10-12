@@ -1,0 +1,47 @@
+{
+  "schema_version": 2,
+  "name": "stage-dynamic-slice-fill-smoke-v1",
+  "target": "ascend950dt",
+  "bounds": {
+    "max_nodes": 1,
+    "max_rank": 1,
+    "max_operands": 3,
+    "max_results": 1,
+    "max_shape_symbols": 1,
+    "allow_dynamic_shapes": true,
+    "allow_control_flow": false,
+    "allow_effects": true
+  },
+  "catalog_dialects": ["bufferization", "linalg", "tensor"],
+  "operations": [
+    "ags.buffer",
+    "ags.input",
+    "bufferization.to_tensor",
+    "linalg.fill",
+    "tensor.extract_slice"
+  ],
+  "integer_bits": [32],
+  "floating_bits": [],
+  "include_index_type": true,
+  "pointer_address_spaces": [],
+  "integer_constants": [],
+  "tensor_shapes": [[4], [8]],
+  "explicit_types": ["memref<?xi32>"],
+  "attribute_domains": {
+    "slice_segments": [[1, 1, 0, 0]],
+    "slice_offsets": [[-1]],
+    "slice_sizes": [[4]],
+    "slice_strides": [[1]]
+  },
+  "semantic_domains": [
+    "buffer",
+    "definedness",
+    "effect",
+    "index",
+    "layout",
+    "shape",
+    "signature",
+    "value"
+  ]
+}
+

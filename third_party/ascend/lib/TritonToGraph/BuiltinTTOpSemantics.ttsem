@@ -1,0 +1,2847 @@
+# TTIR denotational semantics used by AutoGraphSolver.
+#
+# This file defines what one operation means. It must not describe a source
+# graph, a replacement graph, or a workload-specific optimization.
+
+semantics pure ags.input() {
+  import = false;
+  search = import_only;
+  value = input_value();
+  # The current compute-island contract admits ordinary TTIR values at its
+  # boundary. Operations carrying explicit poison-producing promises are
+  # rejected before they can become part of the island.
+  valid = true;
+}
+
+# Synthetic boundary terminal for storage created by a private allocation in
+# the current block.  It is materialized by reusing that allocation exactly as
+# ags.input reuses an ordinary boundary value.  The distinct denotation lets
+# the generic buffer algebra prove that writes through two different private
+# allocation identities cannot alias; arbitrary ags.input memrefs remain
+# conservatively possibly-aliasing.
+semantics pure ags.private_buffer() {
+  import = false;
+  search = import_only;
+  value = private_buffer_value();
+  valid = true;
+}
+
+# Synthetic proof-language terminal for the memory state entering an offline
+# semantic graph. It is never materialized as TTIR.
+semantics pure ags.memory() {
+  import = false;
+  search = import_only;
+  value = input_memory();
+  valid = true;
+}
+
+# Quantified theorem variable for a MemoryState transition that satisfies the
+# generic launch-partition preflight.  Unlike ags.memory, this node carries the
+# exact axis/tail premise proved again when a RuleDB template is instantiated;
+# it must never be emitted into user TTIR.
+semantics pure ags.partitionable_memory() {
+  import = false;
+  candidate = and(offline_only(), memory_state(result),
+                  attribute_i32(axis, launch_axis),
+                  attribute_i32(ceil_div, launch_ceil_div));
+  materialize = proof_only;
+  value = partitionable_memory(axis, ceil_div);
+  valid = true;
+  effect = partitionable_memory(axis, ceil_div);
+  memory = partitionable_memory(axis, ceil_div);
+  memory_valid = true;
+}
+
+# Synthetic proof-language terminal for the kernel launch contract entering an
+# offline graph. It carries grid/program-id meaning and is never materialized.
+semantics pure ags.launch() {
+  import = false;
+  search = import_only;
+  value = input_launch();
+  valid = true;
+}
+
+# Optional launch contract supplied by the frontend/launcher. It makes the
+# otherwise external relation between one grid extent and a scalar kernel
+# argument part of the proof key. AGS never infers this relation from a guard.
+semantics pure ags.launch_bound(bound) {
+  import = false;
+  candidate = and(offline_only(), state_operand(launch),
+                  launch_state(result), scalar(bound),
+                  integer_element(bound),
+                  attribute_i32(axis, program_axis));
+  materialize = proof_only;
+  value = launch_bound(axis, value(bound));
+  valid = valid(bound);
+  launch = launch_bound(axis, value(bound));
+  launch_valid = valid(bound);
+}
+
+semantics pure ags.launch_remap() {
+  import = launch_state(result);
+  candidate = and(offline_only(), state_operand(launch),
+                  launch_state(result),
+                  attribute_i32(axis, launch_axis),
+                  attribute_i32(factor, launch_factor),
+                  attribute_i32(ceil_div, launch_ceil_div));
+  materialize = proof_only;
+  action = module_attrs(
+      set_attr_i32(hacc.coalesce_axis, axis),
+      set_attr_i32(hacc.coalesce_factor, factor),
+      set_attr_i32(hacc.coalesce_grid_ceil_div, ceil_div));
+  value = input_launch();
+  valid = true;
+  launch = launch_remap(axis, factor, ceil_div);
+  launch_valid = true;
+}
+
+# Synthetic whole-kernel proof root. It binds the final observable MemoryState
+# to the LaunchState under which that state was produced. Search and proof may
+# compare these roots, but the generic materializer must never emit ags.kernel
+# into user IR.
+semantics pure ags.kernel() {
+  import = false;
+  candidate = and(offline_only(), state_operand(memory),
+                  state_operand(launch), memory_state(result));
+  materialize = proof_only;
+  value = kernel_effect(input_memory(), input_launch());
+  valid = kernel_effect(input_memory_valid(), input_launch());
+  effect = kernel_effect(input_effect(), input_launch());
+  memory = kernel_effect(input_memory(), input_launch());
+  memory_valid = kernel_effect(input_memory_valid(), input_launch());
+  launch = kernel_effect(input_memory(), input_launch());
+  launch_valid = kernel_effect(input_memory_valid(), input_launch());
+}
+
+# Compact higher-order launch-partition candidate. Its two state operands are
+# the arbitrary per-program MemoryState and LaunchState selected by generic
+# typed enumeration. No lane topology is encoded here: `kernel_partition` is
+# a quantified semantic theorem, and `launch_partition` is its declarative
+# online compiler action. Extending the finite factor/axis domains therefore
+# needs no C++ matcher and no factor copies of the candidate graph.
+semantics pure ags.kernel_partition() {
+  import = false;
+  candidate = and(offline_only(), state_operand(memory),
+                  state_operand(launch), memory_state(result),
+                  attribute_i32(axis, launch_axis),
+                  attribute_i32(factor, launch_factor),
+                  attribute_integer_greater(factor, 1),
+                  attribute_i32(ceil_div, launch_ceil_div));
+  materialize = proof_only;
+  action = launch_partition(axis, factor, ceil_div);
+  value = kernel_partition(input_memory(), input_launch(), axis, factor,
+                           ceil_div);
+  valid = kernel_partition(input_memory_valid(), input_launch(), axis, factor,
+                           ceil_div);
+  effect = kernel_partition(input_effect(), input_launch(), axis, factor,
+                            ceil_div);
+  memory = kernel_partition(input_memory(), input_launch(), axis, factor,
+                            ceil_div);
+  memory_valid = kernel_partition(input_memory_valid(), input_launch(), axis,
+                                  factor, ceil_div);
+  launch = kernel_partition(input_memory(), input_launch(), axis, factor,
+                            ceil_div);
+  launch_valid = kernel_partition(input_memory_valid(), input_launch(), axis,
+                                  factor, ceil_div);
+}
+
+# Synthetic stage-local BufferState terminal. Stage adapters import concrete
+# allocation/view state into this common proof token.
+semantics pure ags.buffer() {
+  import = false;
+  search = import_only;
+  value = input_buffer();
+  valid = true;
+}
+
+# Stage-level buffer reads and writes use the same declarative state contract
+# as TTIR memory effects, but remain a distinct proof domain. The generic
+# stage adapter may import any operation whose signature is described here;
+# no C12 graph topology is embedded in the solver.
+semantics buffer_read(source) bufferization.to_tensor(source) {
+  import = and(ranked_memref(source), ranked_tensor(result),
+               same_shape(source, result),
+               same_element_type(source, result));
+  candidate = and(offline_only(), ranked_memref(source),
+                  ranked_tensor(result), same_shape(source, result),
+                  same_element_type(source, result),
+                  state_operand(buffer));
+  value = buffer_read(source);
+  # MLIR memref SSA values are required to designate live storage at each
+  # access. Alias/ownership/lifetime are checked by the online BufferState
+  # materializer before it removes a transition; they are not value bits.
+  valid = valid(source);
+}
+
+semantics buffer_write(target) memref.copy(source, target) {
+  import = and(ranked_memref(source), ranked_memref(target),
+               same_shape(source, target),
+               same_element_type(source, target));
+  candidate = and(offline_only(), buffer_state(result),
+                  ranked_memref(source), ranked_memref(target),
+                  same_shape(source, target),
+                  same_element_type(source, target),
+                  state_operand(buffer));
+  value = buffer_write(value(target), buffer_read(source));
+  valid = and(valid(source), valid(target));
+  buffer = buffer_write(value(target), buffer_read(source));
+  buffer_valid = and(valid(source), valid(target));
+}
+
+# A destination-style fill is a functional write of the scalar value to every
+# coordinate of its memref output.  The common BufferState interpreter supplies
+# the iteration space; no fill/concat topology is encoded here.
+semantics buffer_write(target) linalg.fill(fill_value, target) {
+  import = and(scalar(fill_value), ranked_memref(target),
+               same_element_type(fill_value, target));
+  candidate = and(offline_only(), buffer_state(result), scalar(fill_value),
+                  ranked_memref(target),
+                  same_element_type(fill_value, target),
+                  state_operand(buffer));
+  value = buffer_fill(target, value(fill_value));
+  valid = and(valid(fill_value), valid(target));
+  buffer = buffer_fill(target, value(fill_value));
+  buffer_valid = and(valid(fill_value), valid(target));
+}
+
+# Generic projection for the MemoryState output carried by a stateful value
+# node (notably atomic operations). It is a proof/search node, not TTIR.
+semantics pure ags.memory_after(input) {
+  import = false;
+  candidate = and(offline_only(), memory_state(result),
+                  producer_effect(input, atomic));
+  value = memory_of(input);
+  valid = memory_valid_of(input);
+  memory = memory_of(input);
+  memory_valid = memory_valid_of(input);
+}
+
+semantics pure arith.constant() {
+  import = integer_constant(value);
+  # Finite constants are seeded from the universe's integer_constants domain;
+  # they are not produced by the generic schema/operand Cartesian product.
+  search = import_only;
+  shareable = true;
+  value = constant(value);
+  valid = true;
+}
+
+semantics pure arith.select(condition, true_value, false_value) {
+  import = integer_or_float_element(result);
+  candidate = and(integer_or_float_element(result),
+                  integer_bits(condition, 1),
+                  same_type(result, true_value),
+                  same_type(result, false_value),
+                  same_container(result, condition));
+  value = select(value(condition), value(true_value), value(false_value));
+  valid = and(valid(condition),
+              select(value(condition), valid(true_value), valid(false_value)));
+}
+
+semantics pure arith.xori(lhs, rhs) {
+  import = integer_element(result);
+  candidate = and(integer_element(result),
+                  same_type(result, lhs),
+                  same_type(result, rhs));
+  value = bit_xor(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+semantics pure arith.andi(lhs, rhs) {
+  import = integer_element(result);
+  candidate = and(integer_element(result),
+                  same_type(result, lhs),
+                  same_type(result, rhs));
+  value = bit_and(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+semantics pure arith.ori(lhs, rhs) {
+  import = integer_element(result);
+  candidate = and(integer_element(result),
+                  same_type(result, lhs),
+                  same_type(result, rhs));
+  value = bit_or(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+semantics pure arith.extui(input) {
+  import = integer_element(result);
+  # Zero extension is pure and deterministic, so a shared result may remain
+  # inside a larger semantic island.  This lets the solver see both branches
+  # of low-bit DAGs instead of committing a partial extui(trunci(x)) rewrite
+  # before their common consumer is considered.
+  shareable = true;
+  candidate = and(integer_bits(result, 64),
+                  integer_bits(input, 32),
+                  same_container(result, input));
+  value = zext(value(input));
+  valid = valid(input);
+}
+
+semantics pure arith.extsi(input) {
+  import = integer_element(result);
+  candidate = and(offline_only(),
+                  integer_element(result),
+                  integer_element(input),
+                  same_container(result, input),
+                  element_bits_greater(result, input));
+  value = sext(value(input));
+  valid = valid(input);
+}
+
+semantics pure arith.trunci(input) {
+  import = integer_element(result);
+  candidate = and(integer_bits(result, 32),
+                  integer_bits(input, 64),
+                  same_container(result, input));
+  value = trunc(value(input));
+  valid = valid(input);
+}
+
+semantics pure arith.shrui(lhs, rhs) {
+  import = and(integer_element(result),
+               same_type(result, lhs),
+               same_type(result, rhs));
+  candidate = and(integer_bits(result, 32),
+                  same_type(result, lhs),
+                  same_type(result, rhs));
+  value = lshr(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs), shift_amount_valid(value(rhs)));
+}
+
+semantics pure arith.shrsi(lhs, rhs) {
+  import = and(integer_element(result),
+               same_type(result, lhs),
+               same_type(result, rhs));
+  candidate = and(witnessed_operation(), integer_element(result),
+                  same_type(result, lhs), same_type(result, rhs));
+  value = ashr(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs), shift_amount_valid(value(rhs)));
+}
+
+semantics pure arith.addi(lhs, rhs) {
+  import = and(integer_element(result), no_integer_overflow());
+  candidate = and(offline_only(),
+                  integer_element(result),
+                  same_type(result, lhs),
+                  same_type(result, rhs),
+                  no_integer_overflow());
+  shareable = true;
+  value = add(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+semantics pure arith.muli(lhs, rhs) {
+  import = and(integer_element(result), no_integer_overflow());
+  candidate = and(witnessed_operation(), integer_element(result),
+                  same_type(result, lhs), same_type(result, rhs),
+                  no_integer_overflow());
+  shareable = true;
+  value = mul(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+semantics pure arith.remsi(lhs, rhs) {
+  import = and(integer_element(result),
+               same_type(result, lhs),
+               same_type(result, rhs));
+  candidate = and(witnessed_operation(), integer_element(result),
+                  same_type(result, lhs), same_type(result, rhs));
+  value = srem(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs),
+              signed_division_valid(value(lhs), value(rhs)));
+}
+
+semantics pure arith.subi(lhs, rhs) {
+  import = and(integer_element(result), no_integer_overflow());
+  candidate = and(integer_element(result),
+                  same_type(result, lhs),
+                  same_type(result, rhs),
+                  no_integer_overflow());
+  value = sub(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+semantics pure arith.cmpi(lhs, rhs) {
+  import = supported_integer_compare(predicate);
+  # The legacy online beam copies the predicate from a witnessed compare.
+  # Offline enumeration binds it to UniverseSpec.cmpi_predicate; the same
+  # semantic predicate below rejects unsupported values in either path.
+  candidate = and(witnessed_operation(),
+                  attribute(predicate, cmpi_predicate),
+                  supported_integer_compare(predicate),
+                  integer_bits(result, 1),
+                  integer_element(lhs),
+                  same_type(lhs, rhs),
+                  same_container(result, lhs));
+  # Equality predicates are pure canonical facts.  Keeping a shared compare
+  # inside the semantic island lets independent consumers refer to the same
+  # fact without duplicating or pattern-matching those consumers.
+  shareable = true;
+  value = integer_compare(predicate, value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+semantics pure tt.splat(input) {
+  import = and(ranked_tensor(result), scalar(input),
+               same_element_type(result, input));
+  candidate = and(offline_only(),
+                  ranked_tensor(result),
+                  scalar(input),
+                  same_element_type(result, input));
+  shareable = true;
+  value = value(input);
+  valid = valid(input);
+}
+
+semantics pure tt.unsplat(input) {
+  import = singleton_tensor_to_scalar(input, result);
+  candidate = and(offline_only(),
+                  singleton_tensor_to_scalar(input, result));
+  shareable = true;
+  value = singleton_value(input);
+  valid = singleton_valid(input);
+}
+
+# Core Triton pointwise operations are described here, not in candidate
+# discovery C++.  Opaque `apply_*` nodes retain the exact operation name,
+# result type and semantic attributes in their payload.  That is sufficient
+# to commute the same operation through index-only transforms without ever
+# claiming that two different conversions or arithmetic functions are equal.
+semantics pure tt.int_to_ptr(input) {
+  import = and(pointer_element(result), integer_bits(input, 64),
+               same_container(result, input));
+  candidate = and(offline_only(), pointer_element(result),
+                  integer_bits(input, 64), same_container(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure tt.ptr_to_int(input) {
+  import = and(integer_bits(result, 64), pointer_element(input),
+               same_container(result, input));
+  candidate = and(offline_only(), integer_bits(result, 64),
+                  pointer_element(input), same_container(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure tt.bitcast(input) {
+  import = and(same_container(result, input),
+               or(and(pointer_element(result), pointer_element(input),
+                      same_memory_space(result, input)),
+                  and(integer_or_float_element(result),
+                      integer_or_float_element(input),
+                      same_element_bits(result, input))));
+  candidate = and(offline_only(), same_container(result, input),
+                  or(and(pointer_element(result), pointer_element(input),
+                         same_memory_space(result, input)),
+                     and(integer_or_float_element(result),
+                         integer_or_float_element(input),
+                         same_element_bits(result, input))));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+# A rounding attribute is always materialized for offline fp_to_fp candidates.
+# This covers both widening and narrowing without relying on an implicit
+# target default; imported widening operations may still omit the attribute.
+semantics pure tt.fp_to_fp(input) {
+  import = and(float_element(result), float_element(input),
+               same_container(result, input),
+               or(element_bits_greater(result, input),
+                  same_element_bits(result, input),
+                  attribute(rounding, rounding_mode)));
+  candidate = and(offline_only(), attribute_i32(rounding, rounding_mode),
+                  float_element(result), float_element(input),
+                  same_container(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure tt.clampf(input, min_value, max_value) {
+  import = and(float_element(result), same_type(result, input),
+               same_type(result, min_value), same_type(result, max_value),
+               attribute(propagateNan, propagate_nan));
+  candidate = and(offline_only(),
+                  attribute_i32(propagateNan, propagate_nan),
+                  float_element(result), same_type(result, input),
+                  same_type(result, min_value), same_type(result, max_value));
+  value = apply_ternary(value(input), value(min_value), value(max_value));
+  valid = and(valid(input), valid(min_value), valid(max_value));
+}
+
+semantics pure tt.precise_divf(lhs, rhs) {
+  import = and(float_element(result), same_type(result, lhs),
+               same_type(result, rhs));
+  candidate = and(offline_only(), float_element(result),
+                  same_type(result, lhs), same_type(result, rhs));
+  value = apply_binary(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+semantics pure tt.mulhiui(lhs, rhs) {
+  import = and(integer_element(result), same_type(result, lhs),
+               same_type(result, rhs));
+  candidate = and(offline_only(), integer_element(result),
+                  same_type(result, lhs), same_type(result, rhs));
+  value = unsigned_multiply_high(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+semantics pure tt.get_program_id() {
+  import = integer_element(result);
+  candidate = and(offline_only(), state_operand(launch),
+                  attribute_i32(axis, program_axis),
+                  integer_element(result));
+  shareable = true;
+  value = program_id(axis);
+  valid = true;
+}
+
+# Grid size is launch state, not a free scalar. A factor>1 remap therefore
+# remains non-equivalent when the remapped axis is observed, unless a future
+# launch theorem explicitly proves the corresponding extent conversion.
+semantics pure tt.get_num_programs() {
+  import = integer_element(result);
+  candidate = and(offline_only(), state_operand(launch),
+                  attribute_i32(axis, program_axis),
+                  integer_element(result));
+  shareable = true;
+  value = num_programs(axis);
+  valid = true;
+}
+
+semantics pure tt.addptr(pointer, offset) {
+  import = and(pointer_element(result),
+               same_type(result, pointer),
+               integer_element(offset),
+               same_container(result, offset));
+  candidate = and(witnessed_operation(),
+                  pointer_element(result),
+                  same_type(result, pointer),
+                  integer_element(offset),
+                  same_container(result, offset));
+  explore = true;
+  value = pointer_add(value(pointer), value(offset));
+  valid = and(valid(pointer), valid(offset));
+}
+
+# Tensor-pointer construction has three equally-sized variadic groups
+# (shape/stride/offset).  `operand_arity` is a language-level arity relation;
+# the candidate enumerator itself remains unaware of this operation.
+semantics pure tt.make_tensor_ptr(base, metadata) {
+  variadic = metadata;
+  operand_arity = sequence(4, 3);
+  import = and(attribute(order, tensor_pointer_order),
+               tensor_pointer_constructor(base, result, order));
+  candidate = and(offline_only(),
+                  attribute(order, tensor_pointer_order),
+                  tensor_pointer_constructor(base, result, order));
+  value = apply_nary();
+  valid = all_operands_valid();
+}
+
+semantics pure tt.advance(pointer, offsets) {
+  variadic = offsets;
+  import = tensor_pointer_advance(pointer, result);
+  candidate = and(offline_only(),
+                  tensor_pointer_advance(pointer, result));
+  value = apply_nary();
+  valid = all_operands_valid();
+}
+
+# Region terminators are structural syntax captured by CanonicalRegion.  They
+# are not standalone candidates in the graph universe, but declaring them here
+# makes the operation catalog explicit instead of misreporting them as missing
+# mathematical semantics.
+semantics pure tt.reduce.return(values) {
+  variadic = values;
+  operand_arity = sequence(0, 1);
+  search = region_only;
+  import = true;
+  value = apply_nary();
+  valid = all_operands_valid();
+}
+
+semantics pure tt.scan.return(values) {
+  variadic = values;
+  operand_arity = sequence(0, 1);
+  search = region_only;
+  import = true;
+  value = apply_nary();
+  valid = all_operands_valid();
+}
+
+semantics pure tt.map_elementwise.return(values) {
+  variadic = values;
+  operand_arity = sequence(0, 1);
+  search = region_only;
+  import = true;
+  value = apply_nary();
+  valid = all_operands_valid();
+}
+
+semantics pure tt.return(values) {
+  variadic = values;
+  operand_arity = sequence(0, 1);
+  search = region_only;
+  import = true;
+  value = apply_nary();
+  valid = all_operands_valid();
+}
+
+# Callable containers and their terminators are structural region syntax, not
+# candidate graph nodes. Calls themselves are conservative observable
+# boundaries because interprocedural summaries are not part of the TTIR
+# island language yet.
+semantics pure tt.func() {
+  search = region_only;
+  region = imported;
+  import = true;
+  value = apply_nary();
+  valid = true;
+}
+
+semantics pure tt.call(arguments) {
+  variadic = arguments;
+  operand_arity = sequence(0, 1);
+  result_index = any;
+  operation_results = imported;
+  search = import_only;
+  import = and(attribute(callee, call_callee), callee_is_pure());
+  value = call_summary_value();
+  valid = call_summary_valid();
+}
+
+semantics observable tt.call(arguments) {
+  variadic = arguments;
+  operand_arity = sequence(0, 1);
+  result_index = any;
+  operation_results = imported;
+  search = import_only;
+  import = and(attribute(callee, call_callee), not(callee_is_pure()));
+  value = apply_nary();
+  valid = all_operands_valid();
+}
+
+# Debug/diagnostic operations are ordered observable actions.  They are
+# intentionally import-only: AGS may preserve them in MemoryState and prove
+# that surrounding rewrites do not cross the barrier, but never invents or
+# removes a print/assert candidate.
+semantics observable tt.print(arguments) {
+  variadic = arguments;
+  operand_arity = sequence(0, 1);
+  search = import_only;
+  import = and(attribute(prefix, print_prefix),
+               attribute(hex, print_hex),
+               attribute(isSigned, print_signedness));
+  value = apply_nary();
+  valid = all_operands_valid();
+}
+
+semantics observable tt.assert(condition) {
+  search = import_only;
+  import = and(integer_bits(condition, 1),
+               attribute(message, assert_message));
+  value = apply_nary();
+  valid = all_operands_valid();
+}
+
+# External calls remain opaque but their complete symbol identity participates
+# in the denotation.  Pure calls may be imported as immutable values; impure
+# calls also advance the ordered observable state.  Neither is synthesized by
+# offline search because AGS cannot invent an ABI or implementation symbol.
+semantics pure tt.extern_elementwise(arguments) {
+  variadic = arguments;
+  operand_arity = sequence(0, 1);
+  search = import_only;
+  import = and(attribute_boolean_equals(pure, true),
+               attribute(libname, external_libname),
+               attribute(libpath, external_libpath),
+               attribute(symbol, external_symbol));
+  value = apply_nary();
+  valid = all_operands_valid();
+}
+
+semantics observable tt.extern_elementwise(arguments) {
+  variadic = arguments;
+  operand_arity = sequence(0, 1);
+  search = import_only;
+  import = and(attribute_boolean_equals(pure, false),
+               attribute(libname, external_libname),
+               attribute(libpath, external_libpath),
+               attribute(symbol, external_symbol));
+  value = apply_nary();
+  valid = all_operands_valid();
+}
+
+# Tensor descriptors are first-class opaque address-space handles.  Their
+# block type and metadata arity are checked by reusable type predicates; all
+# accesses use the same abstract key constructor, so reads and writes can be
+# compared without a descriptor-operation matcher.
+semantics pure tt.make_tensor_descriptor(base, metadata) {
+  variadic = metadata;
+  operand_arity = sequence(3, 2);
+  import = and(tensor_descriptor(result),
+               descriptor_base(base, result),
+               descriptor_metadata(result, 1),
+               attribute_optional(padding));
+  candidate = and(offline_only(), tensor_descriptor(result),
+                  descriptor_base(base, result),
+                  descriptor_metadata(result, 1));
+  value = apply_nary();
+  valid = all_operands_valid();
+}
+
+semantics read(descriptor) tt.descriptor_load(descriptor, indices) {
+  variadic = indices;
+  import = and(descriptor_block_same(descriptor, result),
+               descriptor_indices(descriptor, 1));
+  candidate = and(offline_only(), state_operand(memory),
+                  descriptor_block_same(descriptor, result),
+                  descriptor_indices(descriptor, 1));
+  value = memory_read(operation_key());
+  valid = and(all_operands_valid(), memory_valid(operation_key()));
+}
+
+semantics write(descriptor, source)
+    tt.descriptor_store(descriptor, source, indices) {
+  variadic = indices;
+  import = and(descriptor_block_same(descriptor, source),
+               descriptor_indices(descriptor, 2));
+  candidate = and(offline_only(), memory_state(result),
+                  descriptor_block_same(descriptor, source),
+                  descriptor_indices(descriptor, 2));
+  value = memory_write(operation_key_except(1), value(source));
+  valid = and(all_operands_valid(),
+              memory_valid(operation_key_except(1)));
+  memory = memory_write(operation_key_except(1), value(source));
+  memory_valid = and(all_operands_valid(),
+                     memory_valid(operation_key_except(1)));
+}
+
+semantics read(descriptor)
+    tt.descriptor_gather(descriptor, x_offsets, y_offset) {
+  import = and(descriptor_gather_shape(descriptor, x_offsets, result),
+               integer_bits(y_offset, 32));
+  candidate = and(offline_only(), state_operand(memory),
+                  descriptor_gather_shape(descriptor, x_offsets, result),
+                  integer_bits(y_offset, 32));
+  value = memory_read(operation_key());
+  valid = and(all_operands_valid(), memory_valid(operation_key()));
+}
+
+semantics write(descriptor, source)
+    tt.descriptor_scatter(descriptor, x_offsets, y_offset, source) {
+  lane_domain = source;
+  import = and(descriptor_gather_shape(descriptor, x_offsets, source),
+               integer_bits(y_offset, 32));
+  candidate = and(offline_only(), memory_state(result),
+                  descriptor_gather_shape(descriptor, x_offsets, source),
+                  integer_bits(y_offset, 32));
+  value = memory_write(operation_key_except(3), value(source));
+  valid = and(all_operands_valid(),
+              memory_valid(operation_key_except(3)));
+  memory = memory_write(operation_key_except(3), value(source));
+  memory_valid = and(all_operands_valid(),
+                     memory_valid(operation_key_except(3)));
+}
+
+semantics write(descriptor, source)
+    tt.descriptor_reduce(descriptor, source, indices) {
+  variadic = indices;
+  lane_domain = source;
+  import = and(descriptor_block_same(descriptor, source),
+               descriptor_indices(descriptor, 2),
+               attribute_i32(kind, descriptor_reduce_kind));
+  candidate = and(offline_only(), state_operand(memory),
+                  descriptor_block_same(descriptor, source),
+                  descriptor_indices(descriptor, 2),
+                  attribute_i32(kind, descriptor_reduce_kind));
+  value = memory_atomic(operation_key_except(1), value(source));
+  valid = and(all_operands_valid(),
+              memory_valid(operation_key_except(1)));
+  memory = memory_atomic(operation_key_except(1), value(source));
+  memory_valid = and(all_operands_valid(),
+                     memory_valid(operation_key_except(1)));
+}
+
+# A rectangular strided access is defined by ordinary address arithmetic and
+# an in-bounds predicate.  The five overloads are only the finite rank surface
+# of the target OP (rank <= 5); candidate discovery and proof remain generic.
+semantics read(src)
+    ascend.stride_load(src, offset, other, stride0, numel0) {
+  import = and(scalar(src), pointer_element(src), scalar(other),
+               ranked_tensor(result), same_element_type(result, other),
+               pointer_pointee_element_type(result, src),
+               rectangular_index_pack(result, offset, stride0, numel0));
+  candidate = and(offline_only(), scalar(src), pointer_element(src),
+                  scalar(other), ranked_tensor(result),
+                  same_element_type(result, other),
+                  pointer_pointee_element_type(result, src),
+                  rectangular_index_pack(result, offset, stride0, numel0));
+  value = select(
+      rectangular_in_bounds(result_indices(), value(numel0)),
+      memory_read(linear_address(value(src), value(offset),
+                                 result_indices(), value(stride0))),
+      value(other));
+  valid = and(
+      valid(numel0),
+      select(rectangular_in_bounds(result_indices(), value(numel0)),
+             and(valid(src), valid(offset), valid(stride0),
+                 memory_valid(linear_address(value(src), value(offset),
+                                             result_indices(),
+                                             value(stride0)))),
+             valid(other)));
+  effect = select(
+      rectangular_in_bounds(result_indices(), value(numel0)),
+      memory_read(linear_address(value(src), value(offset),
+                                 result_indices(), value(stride0))),
+      true);
+}
+
+semantics read(src)
+    ascend.stride_load(src, offset, other,
+                       stride0, stride1, numel0, numel1) {
+  import = and(scalar(src), pointer_element(src), scalar(other),
+               ranked_tensor(result), same_element_type(result, other),
+               pointer_pointee_element_type(result, src),
+               rectangular_index_pack(result, offset, stride0, stride1,
+                                      numel0, numel1));
+  candidate = and(offline_only(), scalar(src), pointer_element(src),
+                  scalar(other), ranked_tensor(result),
+                  same_element_type(result, other),
+                  pointer_pointee_element_type(result, src),
+                  rectangular_index_pack(result, offset, stride0, stride1,
+                                         numel0, numel1));
+  value = select(
+      rectangular_in_bounds(result_indices(), value(numel0), value(numel1)),
+      memory_read(linear_address(value(src), value(offset), result_indices(),
+                                 value(stride0), value(stride1))),
+      value(other));
+  valid = and(
+      valid(numel0), valid(numel1),
+      select(
+          rectangular_in_bounds(result_indices(), value(numel0),
+                                value(numel1)),
+          and(valid(src), valid(offset), valid(stride0), valid(stride1),
+              memory_valid(linear_address(
+                  value(src), value(offset), result_indices(),
+                  value(stride0), value(stride1)))),
+          valid(other)));
+  effect = select(
+      rectangular_in_bounds(result_indices(), value(numel0), value(numel1)),
+      memory_read(linear_address(value(src), value(offset), result_indices(),
+                                 value(stride0), value(stride1))),
+      true);
+}
+
+semantics read(src)
+    ascend.stride_load(src, offset, other,
+                       stride0, stride1, stride2,
+                       numel0, numel1, numel2) {
+  import = and(scalar(src), pointer_element(src), scalar(other),
+               ranked_tensor(result), same_element_type(result, other),
+               pointer_pointee_element_type(result, src),
+               rectangular_index_pack(result, offset,
+                                      stride0, stride1, stride2,
+                                      numel0, numel1, numel2));
+  candidate = and(offline_only(), scalar(src), pointer_element(src),
+                  scalar(other), ranked_tensor(result),
+                  same_element_type(result, other),
+                  pointer_pointee_element_type(result, src),
+                  rectangular_index_pack(result, offset,
+                                         stride0, stride1, stride2,
+                                         numel0, numel1, numel2));
+  value = select(
+      rectangular_in_bounds(result_indices(), value(numel0), value(numel1),
+                            value(numel2)),
+      memory_read(linear_address(value(src), value(offset), result_indices(),
+                                 value(stride0), value(stride1),
+                                 value(stride2))),
+      value(other));
+  valid = and(
+      valid(numel0), valid(numel1), valid(numel2),
+      select(
+          rectangular_in_bounds(result_indices(), value(numel0),
+                                value(numel1), value(numel2)),
+          and(valid(src), valid(offset), valid(stride0), valid(stride1),
+              valid(stride2),
+              memory_valid(linear_address(
+                  value(src), value(offset), result_indices(),
+                  value(stride0), value(stride1), value(stride2)))),
+          valid(other)));
+  effect = select(
+      rectangular_in_bounds(result_indices(), value(numel0), value(numel1),
+                            value(numel2)),
+      memory_read(linear_address(value(src), value(offset), result_indices(),
+                                 value(stride0), value(stride1),
+                                 value(stride2))),
+      true);
+}
+
+semantics read(src)
+    ascend.stride_load(src, offset, other,
+                       stride0, stride1, stride2, stride3,
+                       numel0, numel1, numel2, numel3) {
+  import = and(scalar(src), pointer_element(src), scalar(other),
+               ranked_tensor(result), same_element_type(result, other),
+               pointer_pointee_element_type(result, src),
+               rectangular_index_pack(result, offset,
+                                      stride0, stride1, stride2, stride3,
+                                      numel0, numel1, numel2, numel3));
+  candidate = and(offline_only(), scalar(src), pointer_element(src),
+                  scalar(other), ranked_tensor(result),
+                  same_element_type(result, other),
+                  pointer_pointee_element_type(result, src),
+                  rectangular_index_pack(result, offset,
+                                         stride0, stride1, stride2, stride3,
+                                         numel0, numel1, numel2, numel3));
+  value = select(
+      rectangular_in_bounds(result_indices(), value(numel0), value(numel1),
+                            value(numel2), value(numel3)),
+      memory_read(linear_address(
+          value(src), value(offset), result_indices(), value(stride0),
+          value(stride1), value(stride2), value(stride3))),
+      value(other));
+  valid = and(
+      valid(numel0), valid(numel1), valid(numel2), valid(numel3),
+      select(
+          rectangular_in_bounds(result_indices(), value(numel0),
+                                value(numel1), value(numel2), value(numel3)),
+          and(valid(src), valid(offset), valid(stride0), valid(stride1),
+              valid(stride2), valid(stride3),
+              memory_valid(linear_address(
+                  value(src), value(offset), result_indices(),
+                  value(stride0), value(stride1), value(stride2),
+                  value(stride3)))),
+          valid(other)));
+  effect = select(
+      rectangular_in_bounds(result_indices(), value(numel0), value(numel1),
+                            value(numel2), value(numel3)),
+      memory_read(linear_address(
+          value(src), value(offset), result_indices(), value(stride0),
+          value(stride1), value(stride2), value(stride3))),
+      true);
+}
+
+semantics read(src)
+    ascend.stride_load(src, offset, other,
+                       stride0, stride1, stride2, stride3, stride4,
+                       numel0, numel1, numel2, numel3, numel4) {
+  import = and(scalar(src), pointer_element(src), scalar(other),
+               ranked_tensor(result), same_element_type(result, other),
+               pointer_pointee_element_type(result, src),
+               rectangular_index_pack(
+                   result, offset, stride0, stride1, stride2, stride3,
+                   stride4, numel0, numel1, numel2, numel3, numel4));
+  candidate = and(offline_only(), scalar(src), pointer_element(src),
+                  scalar(other), ranked_tensor(result),
+                  same_element_type(result, other),
+                  pointer_pointee_element_type(result, src),
+                  rectangular_index_pack(
+                      result, offset, stride0, stride1, stride2, stride3,
+                      stride4, numel0, numel1, numel2, numel3, numel4));
+  value = select(
+      rectangular_in_bounds(result_indices(), value(numel0), value(numel1),
+                            value(numel2), value(numel3), value(numel4)),
+      memory_read(linear_address(
+          value(src), value(offset), result_indices(), value(stride0),
+          value(stride1), value(stride2), value(stride3), value(stride4))),
+      value(other));
+  valid = and(
+      valid(numel0), valid(numel1), valid(numel2), valid(numel3),
+      valid(numel4),
+      select(
+          rectangular_in_bounds(result_indices(), value(numel0),
+                                value(numel1), value(numel2), value(numel3),
+                                value(numel4)),
+          and(valid(src), valid(offset), valid(stride0), valid(stride1),
+              valid(stride2), valid(stride3), valid(stride4),
+              memory_valid(linear_address(
+                  value(src), value(offset), result_indices(),
+                  value(stride0), value(stride1), value(stride2),
+                  value(stride3), value(stride4)))),
+          valid(other)));
+  effect = select(
+      rectangular_in_bounds(result_indices(), value(numel0), value(numel1),
+                            value(numel2), value(numel3), value(numel4)),
+      memory_read(linear_address(
+          value(src), value(offset), result_indices(), value(stride0),
+          value(stride1), value(stride2), value(stride3), value(stride4))),
+      true);
+}
+
+semantics write(dst, source)
+    ascend.stride_store(dst, source, offset, stride0, numel0) {
+  lane_domain = source;
+  import = and(scalar(dst), pointer_element(dst), ranked_tensor(source),
+               pointer_pointee_element_type(source, dst),
+               rectangular_index_pack(source, offset, stride0, numel0));
+  candidate = and(offline_only(), memory_state(result), scalar(dst),
+                  pointer_element(dst), ranked_tensor(source),
+                  pointer_pointee_element_type(source, dst),
+                  rectangular_index_pack(source, offset, stride0, numel0));
+  value = memory_write(
+      linear_address(value(dst), value(offset), operand_indices(source),
+                     value(stride0)),
+      value(source),
+      rectangular_in_bounds(operand_indices(source), value(numel0)));
+  valid = and(
+      valid(numel0),
+      select(rectangular_in_bounds(operand_indices(source), value(numel0)),
+             and(valid(dst), valid(source), valid(offset), valid(stride0),
+                 memory_valid(linear_address(
+                     value(dst), value(offset), operand_indices(source),
+                     value(stride0)))),
+             true));
+  memory = memory_write(
+      linear_address(value(dst), value(offset), operand_indices(source),
+                     value(stride0)),
+      value(source),
+      rectangular_in_bounds(operand_indices(source), value(numel0)));
+  memory_valid = and(
+      valid(numel0),
+      select(rectangular_in_bounds(operand_indices(source), value(numel0)),
+             and(valid(dst), valid(source), valid(offset), valid(stride0),
+                 memory_valid(linear_address(
+                     value(dst), value(offset), operand_indices(source),
+                     value(stride0)))),
+             true));
+}
+
+semantics write(dst, source)
+    ascend.stride_store(dst, source, offset,
+                        stride0, stride1, numel0, numel1) {
+  lane_domain = source;
+  import = and(scalar(dst), pointer_element(dst), ranked_tensor(source),
+               pointer_pointee_element_type(source, dst),
+               rectangular_index_pack(source, offset, stride0, stride1,
+                                      numel0, numel1));
+  candidate = and(offline_only(), memory_state(result), scalar(dst),
+                  pointer_element(dst), ranked_tensor(source),
+                  pointer_pointee_element_type(source, dst),
+                  rectangular_index_pack(source, offset, stride0, stride1,
+                                         numel0, numel1));
+  value = memory_write(
+      linear_address(value(dst), value(offset), operand_indices(source),
+                     value(stride0), value(stride1)),
+      value(source),
+      rectangular_in_bounds(operand_indices(source), value(numel0),
+                            value(numel1)));
+  valid = and(
+      valid(numel0), valid(numel1),
+      select(
+          rectangular_in_bounds(operand_indices(source), value(numel0),
+                                value(numel1)),
+          and(valid(dst), valid(source), valid(offset), valid(stride0),
+              valid(stride1),
+              memory_valid(linear_address(
+                  value(dst), value(offset), operand_indices(source),
+                  value(stride0), value(stride1)))),
+          true));
+  memory = memory_write(
+      linear_address(value(dst), value(offset), operand_indices(source),
+                     value(stride0), value(stride1)),
+      value(source),
+      rectangular_in_bounds(operand_indices(source), value(numel0),
+                            value(numel1)));
+  memory_valid = and(
+      valid(numel0), valid(numel1),
+      select(
+          rectangular_in_bounds(operand_indices(source), value(numel0),
+                                value(numel1)),
+          and(valid(dst), valid(source), valid(offset), valid(stride0),
+              valid(stride1),
+              memory_valid(linear_address(
+                  value(dst), value(offset), operand_indices(source),
+                  value(stride0), value(stride1)))),
+          true));
+}
+
+semantics write(dst, source)
+    ascend.stride_store(dst, source, offset,
+                        stride0, stride1, stride2,
+                        numel0, numel1, numel2) {
+  lane_domain = source;
+  import = and(scalar(dst), pointer_element(dst), ranked_tensor(source),
+               pointer_pointee_element_type(source, dst),
+               rectangular_index_pack(source, offset,
+                                      stride0, stride1, stride2,
+                                      numel0, numel1, numel2));
+  candidate = and(offline_only(), memory_state(result), scalar(dst),
+                  pointer_element(dst), ranked_tensor(source),
+                  pointer_pointee_element_type(source, dst),
+                  rectangular_index_pack(source, offset,
+                                         stride0, stride1, stride2,
+                                         numel0, numel1, numel2));
+  value = memory_write(
+      linear_address(value(dst), value(offset), operand_indices(source),
+                     value(stride0), value(stride1), value(stride2)),
+      value(source),
+      rectangular_in_bounds(operand_indices(source), value(numel0),
+                            value(numel1), value(numel2)));
+  valid = and(
+      valid(numel0), valid(numel1), valid(numel2),
+      select(
+          rectangular_in_bounds(operand_indices(source), value(numel0),
+                                value(numel1), value(numel2)),
+          and(valid(dst), valid(source), valid(offset), valid(stride0),
+              valid(stride1), valid(stride2),
+              memory_valid(linear_address(
+                  value(dst), value(offset), operand_indices(source),
+                  value(stride0), value(stride1), value(stride2)))),
+          true));
+  memory = memory_write(
+      linear_address(value(dst), value(offset), operand_indices(source),
+                     value(stride0), value(stride1), value(stride2)),
+      value(source),
+      rectangular_in_bounds(operand_indices(source), value(numel0),
+                            value(numel1), value(numel2)));
+  memory_valid = and(
+      valid(numel0), valid(numel1), valid(numel2),
+      select(
+          rectangular_in_bounds(operand_indices(source), value(numel0),
+                                value(numel1), value(numel2)),
+          and(valid(dst), valid(source), valid(offset), valid(stride0),
+              valid(stride1), valid(stride2),
+              memory_valid(linear_address(
+                  value(dst), value(offset), operand_indices(source),
+                  value(stride0), value(stride1), value(stride2)))),
+          true));
+}
+
+semantics write(dst, source)
+    ascend.stride_store(dst, source, offset,
+                        stride0, stride1, stride2, stride3,
+                        numel0, numel1, numel2, numel3) {
+  lane_domain = source;
+  import = and(scalar(dst), pointer_element(dst), ranked_tensor(source),
+               pointer_pointee_element_type(source, dst),
+               rectangular_index_pack(source, offset,
+                                      stride0, stride1, stride2, stride3,
+                                      numel0, numel1, numel2, numel3));
+  candidate = and(offline_only(), memory_state(result), scalar(dst),
+                  pointer_element(dst), ranked_tensor(source),
+                  pointer_pointee_element_type(source, dst),
+                  rectangular_index_pack(source, offset,
+                                         stride0, stride1, stride2, stride3,
+                                         numel0, numel1, numel2, numel3));
+  value = memory_write(
+      linear_address(value(dst), value(offset), operand_indices(source),
+                     value(stride0), value(stride1), value(stride2),
+                     value(stride3)),
+      value(source),
+      rectangular_in_bounds(operand_indices(source), value(numel0),
+                            value(numel1), value(numel2), value(numel3)));
+  valid = and(
+      valid(numel0), valid(numel1), valid(numel2), valid(numel3),
+      select(
+          rectangular_in_bounds(operand_indices(source), value(numel0),
+                                value(numel1), value(numel2), value(numel3)),
+          and(valid(dst), valid(source), valid(offset), valid(stride0),
+              valid(stride1), valid(stride2), valid(stride3),
+              memory_valid(linear_address(
+                  value(dst), value(offset), operand_indices(source),
+                  value(stride0), value(stride1), value(stride2),
+                  value(stride3)))),
+          true));
+  memory = memory_write(
+      linear_address(value(dst), value(offset), operand_indices(source),
+                     value(stride0), value(stride1), value(stride2),
+                     value(stride3)),
+      value(source),
+      rectangular_in_bounds(operand_indices(source), value(numel0),
+                            value(numel1), value(numel2), value(numel3)));
+  memory_valid = and(
+      valid(numel0), valid(numel1), valid(numel2), valid(numel3),
+      select(
+          rectangular_in_bounds(operand_indices(source), value(numel0),
+                                value(numel1), value(numel2), value(numel3)),
+          and(valid(dst), valid(source), valid(offset), valid(stride0),
+              valid(stride1), valid(stride2), valid(stride3),
+              memory_valid(linear_address(
+                  value(dst), value(offset), operand_indices(source),
+                  value(stride0), value(stride1), value(stride2),
+                  value(stride3)))),
+          true));
+}
+
+semantics write(dst, source)
+    ascend.stride_store(dst, source, offset,
+                        stride0, stride1, stride2, stride3, stride4,
+                        numel0, numel1, numel2, numel3, numel4) {
+  lane_domain = source;
+  import = and(scalar(dst), pointer_element(dst), ranked_tensor(source),
+               pointer_pointee_element_type(source, dst),
+               rectangular_index_pack(
+                   source, offset, stride0, stride1, stride2, stride3,
+                   stride4, numel0, numel1, numel2, numel3, numel4));
+  candidate = and(offline_only(), memory_state(result), scalar(dst),
+                  pointer_element(dst), ranked_tensor(source),
+                  pointer_pointee_element_type(source, dst),
+                  rectangular_index_pack(
+                      source, offset, stride0, stride1, stride2, stride3,
+                      stride4, numel0, numel1, numel2, numel3, numel4));
+  value = memory_write(
+      linear_address(value(dst), value(offset), operand_indices(source),
+                     value(stride0), value(stride1), value(stride2),
+                     value(stride3), value(stride4)),
+      value(source),
+      rectangular_in_bounds(operand_indices(source), value(numel0),
+                            value(numel1), value(numel2), value(numel3),
+                            value(numel4)));
+  valid = and(
+      valid(numel0), valid(numel1), valid(numel2), valid(numel3),
+      valid(numel4),
+      select(
+          rectangular_in_bounds(operand_indices(source), value(numel0),
+                                value(numel1), value(numel2), value(numel3),
+                                value(numel4)),
+          and(valid(dst), valid(source), valid(offset), valid(stride0),
+              valid(stride1), valid(stride2), valid(stride3),
+              valid(stride4),
+              memory_valid(linear_address(
+                  value(dst), value(offset), operand_indices(source),
+                  value(stride0), value(stride1), value(stride2),
+                  value(stride3), value(stride4)))),
+          true));
+  memory = memory_write(
+      linear_address(value(dst), value(offset), operand_indices(source),
+                     value(stride0), value(stride1), value(stride2),
+                     value(stride3), value(stride4)),
+      value(source),
+      rectangular_in_bounds(operand_indices(source), value(numel0),
+                            value(numel1), value(numel2), value(numel3),
+                            value(numel4)));
+  memory_valid = and(
+      valid(numel0), valid(numel1), valid(numel2), valid(numel3),
+      valid(numel4),
+      select(
+          rectangular_in_bounds(operand_indices(source), value(numel0),
+                                value(numel1), value(numel2), value(numel3),
+                                value(numel4)),
+          and(valid(dst), valid(source), valid(offset), valid(stride0),
+              valid(stride1), valid(stride2), valid(stride3),
+              valid(stride4),
+              memory_valid(linear_address(
+                  value(dst), value(offset), operand_indices(source),
+                  value(stride0), value(stride1), value(stride2),
+                  value(stride3), value(stride4)))),
+          true));
+}
+
+# Target memory forms are part of the same semantic language as TTIR memory
+# forms.  They are not optimization patterns: both sides describe an address,
+# a lane mask and a MemoryState transition.  Bounded enumeration can therefore
+# discover that splat(base)+addptr(offsets)+tt.load/store has the same meaning
+# as one indirect target operation without a StridedLoadStore matcher.
+semantics read(src) ascend.indirect_load(src, offsets) {
+  import = and(scalar(src), pointer_element(src), ranked_tensor(offsets),
+               integer_element(offsets), ranked_tensor(result),
+               same_shape(result, offsets),
+               pointer_pointee_element_type(result, src),
+               attribute_boolean_equals(isVolatile, false));
+  candidate = and(offline_only(), scalar(src), pointer_element(src),
+                  ranked_tensor(offsets), integer_element(offsets),
+                  ranked_tensor(result), same_shape(result, offsets),
+                  pointer_pointee_element_type(result, src),
+                  attribute(operandSegmentSizes,
+                            indirect_load_segments_unmasked),
+                  attribute(isVolatile, indirect_load_volatile),
+                  attribute_boolean_equals(isVolatile, false));
+  value = memory_read(pointer_add(value(src), value(offsets)));
+  valid = and(valid(src), valid(offsets),
+              memory_valid(pointer_add(value(src), value(offsets))));
+  effect = memory_read(pointer_add(value(src), value(offsets)));
+}
+
+semantics read(src, mask) ascend.indirect_load(src, offsets, mask) {
+  import = and(scalar(src), pointer_element(src), ranked_tensor(offsets),
+               integer_element(offsets), ranked_tensor(result),
+               same_shape(result, offsets), integer_bits(mask, 1),
+               same_shape(result, mask),
+               pointer_pointee_element_type(result, src),
+               attribute_boolean_equals(isVolatile, false));
+  candidate = and(offline_only(), scalar(src), pointer_element(src),
+                  ranked_tensor(offsets), integer_element(offsets),
+                  ranked_tensor(result), same_shape(result, offsets),
+                  integer_bits(mask, 1), same_shape(result, mask),
+                  pointer_pointee_element_type(result, src),
+                  attribute(operandSegmentSizes,
+                            indirect_load_segments_masked),
+                  attribute(isVolatile, indirect_load_volatile),
+                  attribute_boolean_equals(isVolatile, false));
+  value = select(value(mask),
+                 memory_read(pointer_add(value(src), value(offsets))),
+                 undefined_value());
+  valid = and(valid(mask),
+              select(value(mask),
+                     and(valid(src), valid(offsets),
+                         memory_valid(pointer_add(value(src), value(offsets)))),
+                     false));
+  effect = select(value(mask),
+                  memory_read(pointer_add(value(src), value(offsets))), true);
+}
+
+semantics read(src, mask)
+    ascend.indirect_load(src, offsets, mask, other) {
+  import = and(scalar(src), pointer_element(src), ranked_tensor(offsets),
+               integer_element(offsets), ranked_tensor(result),
+               same_shape(result, offsets), integer_bits(mask, 1),
+               same_shape(result, mask), same_type(result, other),
+               pointer_pointee_element_type(result, src),
+               attribute_boolean_equals(isVolatile, false));
+  candidate = and(offline_only(), scalar(src), pointer_element(src),
+                  ranked_tensor(offsets), integer_element(offsets),
+                  ranked_tensor(result), same_shape(result, offsets),
+                  integer_bits(mask, 1), same_shape(result, mask),
+                  same_type(result, other),
+                  pointer_pointee_element_type(result, src),
+                  attribute(operandSegmentSizes,
+                            indirect_load_segments_other),
+                  attribute(isVolatile, indirect_load_volatile),
+                  attribute_boolean_equals(isVolatile, false));
+  value = select(value(mask),
+                 memory_read(pointer_add(value(src), value(offsets))),
+                 value(other));
+  valid = and(valid(mask),
+              select(value(mask),
+                     and(valid(src), valid(offsets),
+                         memory_valid(pointer_add(value(src), value(offsets)))),
+                     valid(other)));
+  effect = select(value(mask),
+                  memory_read(pointer_add(value(src), value(offsets))), true);
+}
+
+semantics write(src, value)
+    ascend.indirect_store(src, offsets, value) {
+  lane_domain = value;
+  import = and(scalar(src), pointer_element(src), ranked_tensor(offsets),
+               integer_element(offsets), ranked_tensor(value),
+               same_shape(value, offsets),
+               pointer_pointee_element_type(value, src));
+  candidate = and(offline_only(), memory_state(result), scalar(src),
+                  pointer_element(src), ranked_tensor(offsets),
+                  integer_element(offsets), ranked_tensor(value),
+                  same_shape(value, offsets),
+                  pointer_pointee_element_type(value, src));
+  value = memory_write(pointer_add(value(src), value(offsets)), value(value));
+  valid = and(valid(src), valid(offsets), valid(value),
+              memory_valid(pointer_add(value(src), value(offsets))));
+  memory = memory_write(pointer_add(value(src), value(offsets)), value(value));
+  memory_valid = and(valid(src), valid(offsets), valid(value),
+                     memory_valid(pointer_add(value(src), value(offsets))));
+}
+
+semantics write(src, value)
+    ascend.indirect_store(src, offsets, value, mask) {
+  lane_domain = value;
+  import = and(scalar(src), pointer_element(src), ranked_tensor(offsets),
+               integer_element(offsets), ranked_tensor(value),
+               same_shape(value, offsets), integer_bits(mask, 1),
+               same_shape(value, mask),
+               pointer_pointee_element_type(value, src));
+  candidate = and(offline_only(), memory_state(result), scalar(src),
+                  pointer_element(src), ranked_tensor(offsets),
+                  integer_element(offsets), ranked_tensor(value),
+                  same_shape(value, offsets), integer_bits(mask, 1),
+                  same_shape(value, mask),
+                  pointer_pointee_element_type(value, src));
+  value = memory_write(pointer_add(value(src), value(offsets)), value(value),
+                       value(mask));
+  valid = and(valid(mask),
+              select(value(mask),
+                     and(valid(src), valid(offsets), valid(value),
+                         memory_valid(pointer_add(value(src), value(offsets)))),
+                     true));
+  memory = memory_write(pointer_add(value(src), value(offsets)), value(value),
+                        value(mask));
+  memory_valid = and(valid(mask),
+                     select(value(mask),
+                            and(valid(src), valid(offsets), valid(value),
+                                memory_valid(pointer_add(value(src),
+                                                         value(offsets)))),
+                            true));
+}
+
+semantics read(pointer) tt.load(pointer) {
+  import = and(load_result(result, pointer),
+               attribute_absent_or_empty(boundaryCheck),
+               attribute_absent(padding),
+               attribute_absent_or_false(isVolatile));
+  candidate = and(witnessed_operation(), load_result(result, pointer),
+                  attribute(operandSegmentSizes, load_segments_unmasked),
+                  attribute_absent_or_empty(boundaryCheck),
+                  attribute_absent(padding),
+                  attribute_absent_or_false(isVolatile));
+  explore = true;
+  value = memory_read(value(pointer));
+  valid = and(valid(pointer), memory_valid(value(pointer)));
+}
+
+semantics read(pointer, mask) tt.load(pointer, mask) {
+  import = and(load_result(result, pointer),
+               integer_bits(mask, 1),
+               same_container(result, mask),
+               attribute_absent_or_empty(boundaryCheck),
+               attribute_absent(padding),
+               attribute_absent_or_false(isVolatile));
+  candidate = and(witnessed_operation(),
+                  attribute(operandSegmentSizes, load_segments_masked),
+                  load_result(result, pointer),
+                  integer_bits(mask, 1),
+                  same_container(result, mask),
+                  attribute_absent_or_empty(boundaryCheck),
+                  attribute_absent(padding),
+                  attribute_absent_or_false(isVolatile));
+  explore = true;
+  value = select(value(mask),
+                 memory_read(value(pointer)),
+                 undefined_value());
+  valid = and(valid(mask),
+              select(value(mask),
+                     and(valid(pointer), memory_valid(value(pointer))),
+                     false));
+}
+
+semantics read(pointer, mask) tt.load(pointer, mask, other) {
+  import = and(load_result(result, pointer),
+               integer_bits(mask, 1),
+               same_container(result, mask),
+               same_type(result, other),
+               attribute_absent_or_empty(boundaryCheck),
+               attribute_absent(padding),
+               attribute_absent_or_false(isVolatile));
+  candidate = and(witnessed_operation(),
+                  attribute(operandSegmentSizes, load_segments_other),
+                  load_result(result, pointer),
+                  integer_bits(mask, 1),
+                  same_container(result, mask),
+                  same_type(result, other),
+                  attribute_absent_or_empty(boundaryCheck),
+                  attribute_absent(padding),
+                  attribute_absent_or_false(isVolatile));
+  explore = true;
+  value = select(value(mask), memory_read(value(pointer)), value(other));
+  valid = and(valid(mask),
+              select(value(mask),
+                     and(valid(pointer), memory_valid(value(pointer))),
+                     valid(other)));
+}
+
+semantics write(pointer, value) tt.store(pointer, value) {
+  import = and(store_value(pointer, value),
+               attribute_absent_or_empty(boundaryCheck));
+  candidate = and(offline_only(),
+                  memory_state(result),
+                  store_value(pointer, value),
+                  attribute_absent_or_empty(boundaryCheck));
+  value = memory_write(value(pointer), value(value));
+  valid = and(valid(pointer),
+              valid(value),
+              memory_valid(value(pointer)));
+  memory = memory_write(value(pointer), value(value));
+  memory_valid = and(valid(pointer),
+                     valid(value),
+                     memory_valid(value(pointer)));
+}
+
+semantics write(pointer, value, mask) tt.store(pointer, value, mask) {
+  import = and(store_value(pointer, value),
+               integer_bits(mask, 1),
+               same_container(value, mask),
+               attribute_absent_or_empty(boundaryCheck));
+  candidate = and(offline_only(),
+                  memory_state(result),
+                  store_value(pointer, value),
+                  integer_bits(mask, 1),
+                  same_container(value, mask),
+                  attribute_absent_or_empty(boundaryCheck));
+  value = memory_write(value(pointer), value(value), value(mask));
+  valid = and(valid(mask),
+              select(value(mask),
+                     and(valid(pointer),
+                         valid(value),
+                         memory_valid(value(pointer))),
+                     true));
+  memory = memory_write(value(pointer), value(value), value(mask));
+  memory_valid = and(valid(mask),
+                     select(value(mask),
+                            and(valid(pointer),
+                                valid(value),
+                                memory_valid(value(pointer))),
+                            true));
+}
+
+semantics atomic(pointer, value) tt.atomic_rmw(pointer, value) {
+  import = and(load_result(result, pointer), same_type(result, value));
+  candidate = and(offline_only(),
+                  attribute_i32(atomic_rmw_op, atomic_rmw_op),
+                  attribute_i32(sem, memory_semantic),
+                  attribute_i32(scope, memory_scope),
+                  load_result(result, pointer),
+                  same_type(result, value));
+  value = memory_read(value(pointer));
+  valid = and(valid(pointer),
+              valid(value),
+              memory_valid(value(pointer)));
+  memory = memory_atomic(value(pointer), value(value));
+  memory_valid = and(valid(pointer),
+                     valid(value),
+                     memory_valid(value(pointer)));
+}
+
+semantics atomic(pointer, value, mask) tt.atomic_rmw(pointer, value, mask) {
+  import = and(load_result(result, pointer),
+               same_type(result, value),
+               integer_bits(mask, 1),
+               same_container(result, mask));
+  candidate = and(offline_only(),
+                  attribute_i32(atomic_rmw_op, atomic_rmw_op),
+                  attribute_i32(sem, memory_semantic),
+                  attribute_i32(scope, memory_scope),
+                  load_result(result, pointer),
+                  same_type(result, value),
+                  integer_bits(mask, 1),
+                  same_container(result, mask));
+  value = select(value(mask), memory_read(value(pointer)), undefined_value());
+  valid = and(valid(mask),
+              select(value(mask),
+                     and(valid(pointer),
+                         valid(value),
+                         memory_valid(value(pointer))),
+                     false));
+  memory = memory_atomic_masked(value(pointer), value(value), value(mask));
+  memory_valid = and(valid(mask),
+                     select(value(mask),
+                            and(valid(pointer),
+                                valid(value),
+                                memory_valid(value(pointer))),
+                            true));
+}
+
+semantics atomic(pointer, compare, value) tt.atomic_cas(pointer, compare, value) {
+  import = and(load_result(result, pointer),
+               same_type(result, compare),
+               same_type(result, value));
+  candidate = and(offline_only(),
+                  attribute_i32(sem, memory_semantic),
+                  attribute_i32(scope, memory_scope),
+                  load_result(result, pointer),
+                  same_type(result, compare),
+                  same_type(result, value));
+  value = memory_read(value(pointer));
+  valid = and(valid(pointer),
+              valid(compare),
+              valid(value),
+              memory_valid(value(pointer)));
+  memory = memory_atomic(value(pointer), value(compare), value(value));
+  memory_valid = and(valid(pointer),
+                     valid(compare),
+                     valid(value),
+                     memory_valid(value(pointer)));
+}
+
+semantics pure tt.make_range() {
+  import = integer_element(result);
+  candidate = and(offline_only(),
+                  attribute_i32(start, range_start),
+                  attribute_i32(end, range_end),
+                  rank(result, 1),
+                  static_shape(result),
+                  integer_bits(result, 32),
+                  make_range_shape(result, start, end));
+  shareable = true;
+  value = add(result_index(0), attr_int(start));
+  valid = true;
+}
+
+semantics pure tt.expand_dims(input) {
+  import = and(integer_element(result), expand_dims_shape(input, result, axis));
+  candidate = and(offline_only(),
+                  witnessed_operation(),
+                  attribute_i32(axis, axis),
+                  integer_element(result),
+                  expand_dims_shape(input, result, axis));
+  shareable = true;
+  value = expand_dims_value(input, axis);
+  valid = expand_dims_valid(input, axis);
+}
+
+semantics pure tt.broadcast(input) {
+  import = and(integer_element(result), broadcast_shape(input, result));
+  candidate = and(offline_only(),
+                  integer_element(result),
+                  same_element_type(result, input),
+                  broadcast_shape(input, result));
+  shareable = true;
+  value = broadcast_value(input);
+  valid = broadcast_valid(input);
+}
+
+# Index-only permutation. Candidate attributes (notably `order`) are reused
+# from a real operation already present in the semantic island by the generic
+# TTIR language.
+semantics pure tt.trans(input) {
+  import = transpose_shape(input, result, order);
+  candidate = and(witnessed_operation(),
+                  attribute(order, transpose_order),
+                  same_element_type(result, input),
+                  same_encoding(result, input),
+                  transpose_shape(input, result, order));
+  value = transpose_value(input, order);
+  valid = transpose_valid(input, order);
+}
+
+# Logical tensor assembly/indexing semantics.  These clauses are deliberately
+# expressed as coordinate maps, so the generic enumerator can discover, for
+# example, split(join(a, b)) == (a, b) without a join/split peephole matcher.
+semantics pure tt.cat(lhs, rhs) {
+  import = cat_shape(lhs, rhs, result);
+  candidate = and(offline_only(), cat_shape(lhs, rhs, result));
+  value = cat_value(lhs, rhs);
+  valid = cat_valid(lhs, rhs);
+}
+
+semantics pure tt.join(lhs, rhs) {
+  import = join_shape(lhs, rhs, result);
+  candidate = and(offline_only(), join_shape(lhs, rhs, result));
+  value = join_value(lhs, rhs);
+  valid = join_valid(lhs, rhs);
+}
+
+semantics pure tt.split(input) {
+  result_index = 0;
+  operation_results = tuple(split_like(input), split_like(input));
+  import = and(semantic_result(0), split_shape(input, result));
+  candidate = and(offline_only(), semantic_result(0),
+                  split_shape(input, result));
+  value = split_value(input, 0);
+  valid = split_valid(input, 0);
+}
+
+semantics pure tt.split(input) {
+  result_index = 1;
+  operation_results = tuple(split_like(input), split_like(input));
+  import = and(semantic_result(1), split_shape(input, result));
+  candidate = and(offline_only(), semantic_result(1),
+                  split_shape(input, result));
+  value = split_value(input, 1);
+  valid = split_valid(input, 1);
+}
+
+semantics pure tt.gather(source, indices) {
+  import = and(attribute(axis, axis),
+               gather_shape(source, indices, result, axis));
+  candidate = and(offline_only(), attribute_i32(axis, axis),
+                  gather_shape(source, indices, result, axis));
+  value = gather_value(source, indices, axis);
+  valid = gather_valid(source, indices, axis);
+}
+
+# Exact rank-2 IEEE dot.  Approximate input modes and scaled-dot remain outside
+# this clause until their rounding/scaling semantics are executable; they are
+# therefore rejected rather than silently proved with real-number algebra.
+semantics pure tt.dot(lhs, rhs, acc) {
+  import = and(attribute_integer_equals(inputPrecision, 2),
+               attribute_integer_equals(maxNumImpreciseAcc, 0),
+               dot_shape(lhs, rhs, acc, result));
+  candidate = and(offline_only(),
+                  attribute_i32(inputPrecision, input_precision),
+                  attribute_integer_equals(inputPrecision, 2),
+                  attribute_i32(maxNumImpreciseAcc, max_imprecise_acc),
+                  attribute_integer_equals(maxNumImpreciseAcc, 0),
+                  dot_shape(lhs, rhs, acc, result));
+  value = dot_value(lhs, rhs, acc);
+  valid = dot_valid(lhs, rhs, acc);
+}
+
+semantics pure tt.dot_scaled(lhs, rhs, accumulator) {
+  search = import_only;
+  import = and(segments_equal(operandSegmentSizes, 1, 1, 1, 0, 0),
+               attribute_optional(a_elem_type),
+               attribute_optional(b_elem_type),
+               attribute_optional(fastMath),
+               attribute_optional(lhs_k_pack),
+               attribute_optional(rhs_k_pack));
+  value = dot_scaled_value(lhs, rhs, accumulator);
+  valid = dot_scaled_valid(lhs, rhs, accumulator);
+}
+
+semantics pure tt.dot_scaled(lhs, rhs, accumulator, lhs_scale) {
+  search = import_only;
+  import = and(segments_equal(operandSegmentSizes, 1, 1, 1, 1, 0),
+               attribute_optional(a_elem_type),
+               attribute_optional(b_elem_type),
+               attribute_optional(fastMath),
+               attribute_optional(lhs_k_pack),
+               attribute_optional(rhs_k_pack));
+  value = dot_scaled_value(lhs, rhs, accumulator, lhs_scale);
+  valid = dot_scaled_valid(lhs, rhs, accumulator, lhs_scale);
+}
+
+semantics pure tt.dot_scaled(lhs, rhs, accumulator, rhs_scale) {
+  search = import_only;
+  import = and(segments_equal(operandSegmentSizes, 1, 1, 1, 0, 1),
+               attribute_optional(a_elem_type),
+               attribute_optional(b_elem_type),
+               attribute_optional(fastMath),
+               attribute_optional(lhs_k_pack),
+               attribute_optional(rhs_k_pack));
+  value = dot_scaled_value(lhs, rhs, accumulator, rhs_scale);
+  valid = dot_scaled_valid(lhs, rhs, accumulator, rhs_scale);
+}
+
+semantics pure tt.dot_scaled(lhs, rhs, accumulator, lhs_scale, rhs_scale) {
+  search = import_only;
+  import = and(segments_equal(operandSegmentSizes, 1, 1, 1, 1, 1),
+               attribute_optional(a_elem_type),
+               attribute_optional(b_elem_type),
+               attribute_optional(fastMath),
+               attribute_optional(lhs_k_pack),
+               attribute_optional(rhs_k_pack));
+  value = dot_scaled_value(lhs, rhs, accumulator, lhs_scale, rhs_scale);
+  valid = dot_scaled_valid(lhs, rhs, accumulator, lhs_scale, rhs_scale);
+}
+
+# Arbitrary-result operations use an imported result signature: every concrete
+# projection is represented and keyed, but no result arity is guessed by the
+# finite enumerator.  Inline assembly and general scalar regions are opaque
+# boundaries until their body language is executable.
+semantics pure tt.elementwise_inline_asm(arguments) {
+  variadic = arguments;
+  operand_arity = sequence(0, 1);
+  result_index = any;
+  operation_results = imported;
+  search = import_only;
+  import = and(attribute_boolean_equals(pure, true),
+               attribute(asm_string, inline_asm_text),
+               attribute(constraints, inline_asm_constraints),
+               attribute(packed_element, inline_asm_pack));
+  value = apply_nary();
+  valid = all_operands_valid();
+}
+
+semantics observable tt.elementwise_inline_asm(arguments) {
+  variadic = arguments;
+  operand_arity = sequence(0, 1);
+  result_index = any;
+  operation_results = imported;
+  search = import_only;
+  import = and(attribute_boolean_equals(pure, false),
+               attribute(asm_string, inline_asm_text),
+               attribute(constraints, inline_asm_constraints),
+               attribute(packed_element, inline_asm_pack));
+  value = apply_nary();
+  valid = all_operands_valid();
+}
+
+semantics pure tt.map_elementwise(inputs) {
+  variadic = inputs;
+  result_index = any;
+  operation_results = imported;
+  region = imported;
+  search = import_only;
+  import = attribute_integer_equals(pack, 1);
+  value = region_value();
+  valid = region_valid();
+}
+
+# Packed scalar regions and effectful/unsupported bodies remain conservative
+# import barriers.  This clause is disjoint from the executable pack=1 form.
+semantics observable tt.map_elementwise(inputs) {
+  variadic = inputs;
+  result_index = any;
+  operation_results = imported;
+  region = imported;
+  search = import_only;
+  import = attribute_integer_not_equals(pack, 1);
+  value = apply_nary();
+  valid = all_operands_valid();
+}
+
+# Explicit physical-layout conversion. Layout alternatives come only from the
+# finite tensor_encodings universe; the generic enumerator crosses those types
+# with this schema. The operation changes representation, not logical value.
+semantics pure ttg.convert_layout(input) {
+  import = and(ranked_tensor(result), ranked_tensor(input),
+               same_shape(result, input), same_element_type(result, input));
+  candidate = and(offline_only(), ranked_tensor(result), ranked_tensor(input),
+                  same_shape(result, input), same_element_type(result, input));
+  shareable = true;
+  value = value(input);
+  valid = valid(input);
+}
+
+# Row-major shape-only transform. Encoded tensors are deliberately excluded
+# until their physical layout map is represented explicitly.
+semantics pure tt.reshape(input) {
+  import = and(reshape_shape(input, result),
+               attribute_absent(allow_reorder),
+               attribute_absent(efficient_layout));
+  candidate = and(offline_only(), reshape_shape(input, result),
+                  attribute_absent(allow_reorder),
+                  attribute_absent(efficient_layout));
+  shareable = true;
+  value = reshape_value(input);
+  valid = reshape_valid(input);
+}
+
+# Static tensor and memref slices share one coordinate-map denotation.  The
+# operation names remain declarative; the interpreter only knows that result
+# coordinate i denotes source coordinate offset + i * stride.
+semantics pure tensor.extract_slice(source) {
+  import = slice_shape(source, result, static_offsets, static_sizes,
+                       static_strides);
+  candidate = and(offline_only(),
+                  attribute(operandSegmentSizes, slice_segments),
+                  segments_equal(operandSegmentSizes, 1, 0, 0, 0),
+                  attribute_i64_array(static_offsets, slice_offsets),
+                  attribute_i64_array(static_sizes, slice_sizes),
+                  attribute_i64_array(static_strides, slice_strides),
+                  slice_shape(source, result, static_offsets, static_sizes,
+                              static_strides));
+  value = slice_value(source, static_offsets, static_sizes, static_strides);
+  valid = slice_valid(source, static_offsets, static_sizes, static_strides);
+}
+
+# The final operand name is a one-or-more variadic tail. Its concrete arities
+# are derived from UniverseSpec.max_operands; operandSegmentSizes partitions
+# that tail into dynamic offsets, sizes and strides. No slice topology is
+# encoded in the enumerator or materializer.
+semantics pure tensor.extract_slice(source, dynamic) {
+  variadic = dynamic;
+  import = mixed_slice_shape(source, result, operandSegmentSizes,
+                             static_offsets, static_sizes, static_strides);
+  candidate = and(offline_only(),
+                  attribute(operandSegmentSizes, slice_segments),
+                  attribute_i64_array(static_offsets, slice_offsets),
+                  attribute_i64_array(static_sizes, slice_sizes),
+                  attribute_i64_array(static_strides, slice_strides),
+                  mixed_slice_shape(source, result, operandSegmentSizes,
+                                    static_offsets, static_sizes,
+                                    static_strides));
+  value = mixed_slice_value(source, operandSegmentSizes, static_offsets,
+                            static_sizes, static_strides);
+  valid = mixed_slice_valid(source, operandSegmentSizes, static_offsets,
+                            static_sizes, static_strides);
+}
+
+semantics pure memref.subview(source) {
+  import = slice_shape(source, result, static_offsets, static_sizes,
+                       static_strides);
+  candidate = and(offline_only(),
+                  attribute(operandSegmentSizes, slice_segments),
+                  segments_equal(operandSegmentSizes, 1, 0, 0, 0),
+                  attribute_i64_array(static_offsets, slice_offsets),
+                  attribute_i64_array(static_sizes, slice_sizes),
+                  attribute_i64_array(static_strides, slice_strides),
+                  slice_shape(source, result, static_offsets, static_sizes,
+                              static_strides));
+  shareable = true;
+  value = slice_value(source, static_offsets, static_sizes, static_strides);
+  valid = slice_valid(source, static_offsets, static_sizes, static_strides);
+}
+
+semantics pure memref.subview(source, dynamic) {
+  variadic = dynamic;
+  import = mixed_slice_shape(source, result, operandSegmentSizes,
+                             static_offsets, static_sizes, static_strides);
+  candidate = and(offline_only(),
+                  attribute(operandSegmentSizes, slice_segments),
+                  attribute_i64_array(static_offsets, slice_offsets),
+                  attribute_i64_array(static_sizes, slice_sizes),
+                  attribute_i64_array(static_strides, slice_strides),
+                  mixed_slice_shape(source, result, operandSegmentSizes,
+                                    static_offsets, static_sizes,
+                                    static_strides));
+  shareable = true;
+  value = mixed_slice_value(source, operandSegmentSizes, static_offsets,
+                            static_sizes, static_strides);
+  valid = mixed_slice_valid(source, operandSegmentSizes, static_offsets,
+                            static_sizes, static_strides);
+}
+
+# `tensor.empty` contributes no value by itself. Its undefined lanes become
+# observable only if a later consumer reads a lane that insert_slice did not
+# cover, which prevents partially initialized candidates from proving equal.
+semantics pure tensor.empty() {
+  import = and(empty_shape(result), integer_or_float_element(result));
+  candidate = and(offline_only(), empty_shape(result),
+                  integer_or_float_element(result));
+  value = undefined_value();
+  valid = false;
+}
+
+# Initial construction fragment for static, rank-preserving, unit-stride
+# slices. The generic evaluator interprets it as a pointwise overlay; this is
+# sufficient for concatenation-shaped values without naming StoreCoalescing.
+semantics pure tensor.insert_slice(source, destination) {
+  import = insert_slice_shape(source, destination, result,
+                              static_offsets, static_sizes, static_strides);
+  candidate = and(offline_only(),
+                  attribute(operandSegmentSizes, insert_slice_segments),
+                  segments_equal(operandSegmentSizes, 1, 1, 0, 0, 0),
+                  attribute_i64_array(static_offsets, slice_offsets),
+                  attribute_i64_array(static_sizes, slice_sizes),
+                  attribute_i64_array(static_strides, slice_strides),
+                  insert_slice_shape(source, destination, result,
+                                     static_offsets, static_sizes,
+                                     static_strides));
+  value = insert_slice_value(source, destination,
+                             static_offsets, static_sizes, static_strides);
+  valid = insert_slice_valid(source, destination,
+                             static_offsets, static_sizes, static_strides);
+}
+
+semantics pure tensor.insert_slice(source, destination, dynamic) {
+  variadic = dynamic;
+  import = mixed_insert_slice_shape(source, destination, result,
+                                    operandSegmentSizes, static_offsets,
+                                    static_sizes, static_strides);
+  candidate = and(offline_only(),
+                  attribute(operandSegmentSizes, insert_slice_segments),
+                  attribute_i64_array(static_offsets, slice_offsets),
+                  attribute_i64_array(static_sizes, slice_sizes),
+                  attribute_i64_array(static_strides, slice_strides),
+                  mixed_insert_slice_shape(source, destination, result,
+                                           operandSegmentSizes,
+                                           static_offsets, static_sizes,
+                                           static_strides));
+  value = mixed_insert_slice_value(source, destination, operandSegmentSizes,
+                                   static_offsets, static_sizes,
+                                   static_strides);
+  valid = mixed_insert_slice_valid(source, destination, operandSegmentSizes,
+                                   static_offsets, static_sizes,
+                                   static_strides);
+}
+
+# Pointwise unary operations share one higher-order semantic form. The
+# operation identity remains part of the denotation, so this proves commuting
+# with index permutations but never confuses two different functions.
+semantics pure arith.truncf(input) {
+  import = and(float_element(result), float_element(input),
+               same_shape(result, input), same_encoding(result, input),
+               element_bits_less(result, input));
+  candidate = and(witnessed_operation(),
+                  float_element(result), float_element(input),
+                  same_shape(result, input), same_encoding(result, input),
+                  element_bits_less(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure arith.extf(input) {
+  import = and(float_element(result), float_element(input),
+               same_shape(result, input), same_encoding(result, input),
+               element_bits_greater(result, input));
+  candidate = and(witnessed_operation(),
+                  float_element(result), float_element(input),
+                  same_shape(result, input), same_encoding(result, input),
+                  element_bits_greater(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure arith.bitcast(input) {
+  import = and(integer_or_float_element(result),
+               integer_or_float_element(input),
+               same_shape(result, input), same_encoding(result, input),
+               same_element_bits(result, input));
+  candidate = and(witnessed_operation(),
+                  integer_or_float_element(result),
+                  integer_or_float_element(input),
+                  same_shape(result, input), same_encoding(result, input),
+                  same_element_bits(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure arith.negf(input) {
+  import = and(float_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+# Pointwise binary operations use one higher-order semantic constructor. The
+# concrete op name and semantic attributes remain in its payload, so the
+# solver may commute the same operation through layout permutations without
+# equating different arithmetic functions.
+semantics pure arith.addf(lhs, rhs) {
+  import = and(float_element(result), same_type(result, lhs),
+               same_type(result, rhs));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, lhs), same_type(result, rhs));
+  value = apply_binary(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+semantics pure arith.subf(lhs, rhs) {
+  import = and(float_element(result), same_type(result, lhs),
+               same_type(result, rhs));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, lhs), same_type(result, rhs));
+  value = apply_binary(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+semantics pure arith.mulf(lhs, rhs) {
+  import = and(float_element(result), same_type(result, lhs),
+               same_type(result, rhs));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, lhs), same_type(result, rhs));
+  value = apply_binary(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+semantics pure arith.divf(lhs, rhs) {
+  import = and(float_element(result), same_type(result, lhs),
+               same_type(result, rhs));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, lhs), same_type(result, rhs));
+  value = apply_binary(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+# Opaque pointwise denotations are still mathematical semantics: the payload
+# contains the exact operation name, result type and semantic attributes.  The
+# solver may move the same total function through index-only operators, but it
+# cannot confuse different functions or invent algebraic identities for them.
+# This is the generic coverage path for the long tail of Arith/Math TTOPs.
+semantics pure arith.cmpf(lhs, rhs) {
+  import = and(float_element(lhs), same_type(lhs, rhs),
+               integer_bits(result, 1), same_container(result, lhs));
+  candidate = and(witnessed_operation(),
+                  attribute(predicate, cmpf_predicate),
+                  float_element(lhs), same_type(lhs, rhs),
+                  integer_bits(result, 1), same_container(result, lhs));
+  value = apply_binary(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+semantics pure arith.divsi(lhs, rhs) {
+  import = and(integer_element(result), same_type(result, lhs),
+               same_type(result, rhs));
+  candidate = and(witnessed_operation(), integer_element(result),
+                  same_type(result, lhs), same_type(result, rhs));
+  value = apply_binary(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs),
+              signed_division_valid(value(lhs), value(rhs)));
+}
+
+semantics pure arith.divui(lhs, rhs) {
+  import = and(integer_element(result), same_type(result, lhs),
+               same_type(result, rhs));
+  candidate = and(witnessed_operation(), integer_element(result),
+                  same_type(result, lhs), same_type(result, rhs));
+  value = udiv(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs), nonzero(value(rhs)));
+}
+
+semantics pure arith.ceildivsi(lhs, rhs) {
+  import = and(integer_element(result), same_type(result, lhs),
+               same_type(result, rhs));
+  candidate = and(witnessed_operation(), integer_element(result),
+                  same_type(result, lhs), same_type(result, rhs));
+  value = apply_binary(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs),
+              signed_division_valid(value(lhs), value(rhs)));
+}
+
+semantics pure arith.ceildivui(lhs, rhs) {
+  import = and(integer_element(result), same_type(result, lhs),
+               same_type(result, rhs));
+  candidate = and(witnessed_operation(), integer_element(result),
+                  same_type(result, lhs), same_type(result, rhs));
+  value = apply_binary(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs), nonzero(value(rhs)));
+}
+
+semantics pure arith.floordivsi(lhs, rhs) {
+  import = and(integer_element(result), same_type(result, lhs),
+               same_type(result, rhs));
+  candidate = and(witnessed_operation(), integer_element(result),
+                  same_type(result, lhs), same_type(result, rhs));
+  value = apply_binary(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs),
+              signed_division_valid(value(lhs), value(rhs)));
+}
+
+semantics pure arith.remui(lhs, rhs) {
+  import = and(integer_element(result), same_type(result, lhs),
+               same_type(result, rhs));
+  candidate = and(witnessed_operation(), integer_element(result),
+                  same_type(result, lhs), same_type(result, rhs));
+  value = apply_binary(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs), nonzero(value(rhs)));
+}
+
+semantics pure arith.remf(lhs, rhs) {
+  import = and(float_element(result), same_type(result, lhs),
+               same_type(result, rhs));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, lhs), same_type(result, rhs));
+  value = apply_binary(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+semantics pure arith.shli(lhs, rhs) {
+  import = and(integer_element(result), same_type(result, lhs),
+               same_type(result, rhs));
+  candidate = and(witnessed_operation(), integer_element(result),
+                  same_type(result, lhs), same_type(result, rhs));
+  value = shl(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs), shift_amount_valid(value(rhs)));
+}
+
+semantics pure arith.maxsi(lhs, rhs) {
+  import = and(integer_element(result), same_type(result, lhs),
+               same_type(result, rhs));
+  candidate = and(witnessed_operation(), integer_element(result),
+                  same_type(result, lhs), same_type(result, rhs));
+  value = apply_binary(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+semantics pure arith.maxui(lhs, rhs) {
+  import = and(integer_element(result), same_type(result, lhs),
+               same_type(result, rhs));
+  candidate = and(witnessed_operation(), integer_element(result),
+                  same_type(result, lhs), same_type(result, rhs));
+  value = apply_binary(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+semantics pure arith.minsi(lhs, rhs) {
+  import = and(integer_element(result), same_type(result, lhs),
+               same_type(result, rhs));
+  candidate = and(witnessed_operation(), integer_element(result),
+                  same_type(result, lhs), same_type(result, rhs));
+  value = apply_binary(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+semantics pure arith.minui(lhs, rhs) {
+  import = and(integer_element(result), same_type(result, lhs),
+               same_type(result, rhs));
+  candidate = and(witnessed_operation(), integer_element(result),
+                  same_type(result, lhs), same_type(result, rhs));
+  value = apply_binary(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+semantics pure arith.maximumf(lhs, rhs) {
+  import = and(float_element(result), same_type(result, lhs),
+               same_type(result, rhs));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, lhs), same_type(result, rhs));
+  value = apply_binary(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+semantics pure arith.minimumf(lhs, rhs) {
+  import = and(float_element(result), same_type(result, lhs),
+               same_type(result, rhs));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, lhs), same_type(result, rhs));
+  value = apply_binary(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+semantics pure arith.maxnumf(lhs, rhs) {
+  import = and(float_element(result), same_type(result, lhs),
+               same_type(result, rhs));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, lhs), same_type(result, rhs));
+  value = apply_binary(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+semantics pure arith.minnumf(lhs, rhs) {
+  import = and(float_element(result), same_type(result, lhs),
+               same_type(result, rhs));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, lhs), same_type(result, rhs));
+  value = apply_binary(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+semantics pure arith.index_cast(input) {
+  import = and(integer_or_index_element(result),
+               integer_or_index_element(input),
+               same_container(result, input));
+  candidate = and(witnessed_operation(),
+                  integer_or_index_element(result),
+                  integer_or_index_element(input),
+                  same_container(result, input));
+  value = signed_integer_cast(value(input));
+  valid = valid(input);
+}
+
+semantics pure arith.index_castui(input) {
+  import = and(integer_or_index_element(result),
+               integer_or_index_element(input),
+               same_container(result, input));
+  candidate = and(witnessed_operation(),
+                  integer_or_index_element(result),
+                  integer_or_index_element(input),
+                  same_container(result, input));
+  value = unsigned_integer_cast(value(input));
+  valid = valid(input);
+}
+
+semantics pure arith.fptosi(input) {
+  import = and(integer_element(result), float_element(input),
+               same_container(result, input));
+  candidate = and(witnessed_operation(), integer_element(result),
+                  float_element(input), same_container(result, input));
+  value = apply_unary(value(input));
+  valid = and(valid(input), apply_unary(value(input)));
+}
+
+semantics pure arith.fptoui(input) {
+  import = and(integer_element(result), float_element(input),
+               same_container(result, input));
+  candidate = and(witnessed_operation(), integer_element(result),
+                  float_element(input), same_container(result, input));
+  value = apply_unary(value(input));
+  valid = and(valid(input), apply_unary(value(input)));
+}
+
+semantics pure arith.sitofp(input) {
+  import = and(float_element(result), integer_element(input),
+               same_container(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  integer_element(input), same_container(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure arith.uitofp(input) {
+  import = and(float_element(result), integer_element(input),
+               same_container(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  integer_element(input), same_container(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure arith.scaling_extf(input, scale) {
+  import = and(float_element(result), float_element(input),
+               float_element(scale), same_shape(result, input),
+               same_shape(input, scale), same_encoding(result, input),
+               same_encoding(input, scale), element_bits_greater(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  float_element(input), float_element(scale),
+                  same_shape(result, input), same_shape(input, scale),
+                  same_encoding(result, input), same_encoding(input, scale),
+                  element_bits_greater(result, input));
+  value = apply_binary(value(input), value(scale));
+  valid = and(valid(input), valid(scale));
+}
+
+semantics pure arith.scaling_truncf(input, scale) {
+  import = and(float_element(result), float_element(input),
+               float_element(scale), same_shape(result, input),
+               same_shape(input, scale), same_encoding(result, input),
+               same_encoding(input, scale), element_bits_less(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  float_element(input), float_element(scale),
+                  same_shape(result, input), same_shape(input, scale),
+                  same_encoding(result, input), same_encoding(input, scale),
+                  element_bits_less(result, input));
+  value = apply_binary(value(input), value(scale));
+  valid = and(valid(input), valid(scale));
+}
+
+semantics pure math.absf(input) {
+  import = and(float_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.absi(input) {
+  import = and(integer_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), integer_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.acos(input) {
+  import = and(float_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.acosh(input) {
+  import = and(float_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.asin(input) {
+  import = and(float_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.asinh(input) {
+  import = and(float_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.atan(input) {
+  import = and(float_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.atanh(input) {
+  import = and(float_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.cbrt(input) {
+  import = and(float_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.cosh(input) {
+  import = and(float_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.erfc(input) {
+  import = and(float_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.expm1(input) {
+  import = and(float_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.log10(input) {
+  import = and(float_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.log1p(input) {
+  import = and(float_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.round(input) {
+  import = and(float_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.roundeven(input) {
+  import = and(float_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.sinh(input) {
+  import = and(float_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.tan(input) {
+  import = and(float_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.trunc(input) {
+  import = and(float_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.ctlz(input) {
+  import = and(integer_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), integer_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.ctpop(input) {
+  import = and(integer_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), integer_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.cttz(input) {
+  import = and(integer_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), integer_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.isfinite(input) {
+  import = and(integer_bits(result, 1), float_element(input),
+               same_container(result, input));
+  candidate = and(witnessed_operation(), integer_bits(result, 1),
+                  float_element(input), same_container(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.isinf(input) {
+  import = and(integer_bits(result, 1), float_element(input),
+               same_container(result, input));
+  candidate = and(witnessed_operation(), integer_bits(result, 1),
+                  float_element(input), same_container(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.isnan(input) {
+  import = and(integer_bits(result, 1), float_element(input),
+               same_container(result, input));
+  candidate = and(witnessed_operation(), integer_bits(result, 1),
+                  float_element(input), same_container(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.isnormal(input) {
+  import = and(integer_bits(result, 1), float_element(input),
+               same_container(result, input));
+  candidate = and(witnessed_operation(), integer_bits(result, 1),
+                  float_element(input), same_container(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.atan2(lhs, rhs) {
+  import = and(float_element(result), same_type(result, lhs),
+               same_type(result, rhs));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, lhs), same_type(result, rhs));
+  value = apply_binary(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+semantics pure math.copysign(lhs, rhs) {
+  import = and(float_element(result), same_type(result, lhs),
+               same_type(result, rhs));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, lhs), same_type(result, rhs));
+  value = apply_binary(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+semantics pure math.powf(lhs, rhs) {
+  import = and(float_element(result), same_type(result, lhs),
+               same_type(result, rhs));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, lhs), same_type(result, rhs));
+  value = apply_binary(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+semantics pure math.ipowi(lhs, rhs) {
+  import = and(integer_element(result), same_type(result, lhs),
+               same_type(result, rhs));
+  candidate = and(witnessed_operation(), integer_element(result),
+                  same_type(result, lhs), same_type(result, rhs));
+  value = apply_binary(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+semantics pure math.fpowi(lhs, rhs) {
+  import = and(float_element(result), same_type(result, lhs),
+               integer_element(rhs), same_container(result, rhs));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, lhs), integer_element(rhs),
+                  same_container(result, rhs));
+  value = apply_binary(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+semantics pure math.clampf(input, min_value, max_value) {
+  import = and(float_element(result), same_type(result, input),
+               same_type(result, min_value), same_type(result, max_value));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input), same_type(result, min_value),
+                  same_type(result, max_value));
+  value = apply_ternary(value(input), value(min_value), value(max_value));
+  valid = and(valid(input), valid(min_value), valid(max_value));
+}
+
+semantics pure math.fma(lhs, rhs, acc) {
+  import = and(float_element(result), same_type(result, lhs),
+               same_type(result, rhs), same_type(result, acc));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, lhs), same_type(result, rhs),
+                  same_type(result, acc));
+  value = apply_ternary(value(lhs), value(rhs), value(acc));
+  valid = and(valid(lhs), valid(rhs), valid(acc));
+}
+
+semantics pure math.ceil(input) {
+  import = and(float_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.floor(input) {
+  import = and(float_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.cos(input) {
+  import = and(float_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.sin(input) {
+  import = and(float_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.erf(input) {
+  import = and(float_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.exp(input) {
+  import = and(float_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.exp2(input) {
+  import = and(float_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.log(input) {
+  import = and(float_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.log2(input) {
+  import = and(float_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.sqrt(input) {
+  import = and(float_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.rsqrt(input) {
+  import = and(float_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure math.tanh(input) {
+  import = and(float_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure tt.precise_sqrt(input) {
+  import = and(float_element(result), same_type(result, input));
+  candidate = and(witnessed_operation(), float_element(result),
+                  same_type(result, input));
+  value = apply_unary(value(input));
+  valid = valid(input);
+}
+
+semantics pure tt.scan(input) {
+  region = binary(arith.addi, tt.scan.return);
+  import = and(integer_element(result),
+               same_type(result, input),
+               binary_scan(axis, reverse, arith.addi));
+  # Scan carries a combiner region. It is a pure reusable semantic value; the
+  # generic canonical-region recipe reconstructs the body for materialization
+  # and target cost modeling.
+  shareable = true;
+  candidate = and(offline_only(),
+                  witnessed_operation(),
+                  attribute_i32(axis, axis),
+                  attribute(reverse, reverse),
+                  integer_element(result),
+                  same_type(result, input),
+                  binary_scan(axis, reverse, arith.addi));
+  value = scan_sum(i, input, axis, reverse);
+  valid = scan_all(i, input, axis, reverse);
+}
+
+# Region overloads are selected by their canonical body recipe, not by a C++
+# operation-name matcher. Adding another finite combiner therefore extends
+# only this semantic file; enumeration, proof and materialization are shared.
+semantics pure tt.scan(input) {
+  region = binary(arith.muli, tt.scan.return);
+  import = and(integer_element(result),
+               same_type(result, input),
+               binary_scan(axis, reverse, arith.muli));
+  shareable = true;
+  candidate = and(offline_only(),
+                  witnessed_operation(),
+                  attribute_i32(axis, axis),
+                  attribute(reverse, reverse),
+                  integer_element(result),
+                  same_type(result, input),
+                  binary_scan(axis, reverse, arith.muli));
+  value = scan_product(i, input, axis, reverse);
+  valid = scan_all(i, input, axis, reverse);
+}
+
+semantics pure tt.reduce(input) {
+  region = binary(arith.addi, tt.reduce.return);
+  import = and(integer_element(result),
+               binary_reduction(axis, arith.addi));
+  candidate = and(offline_only(),
+                  witnessed_operation(),
+                  attribute_i32(axis, axis),
+                  integer_element(result),
+                  integer_element(input),
+                  same_element_type(result, input),
+                  binary_reduction(axis, arith.addi));
+  value = reduce_sum(i, input, axis);
+  valid = reduce_all(i, input, axis);
+}
+
+semantics pure tt.reduce(input) {
+  region = binary(arith.muli, tt.reduce.return);
+  import = and(integer_element(result),
+               binary_reduction(axis, arith.muli));
+  candidate = and(offline_only(),
+                  witnessed_operation(),
+                  attribute_i32(axis, axis),
+                  integer_element(result),
+                  integer_element(input),
+                  same_element_type(result, input),
+                  binary_reduction(axis, arith.muli));
+  value = reduce_product(i, input, axis);
+  valid = reduce_all(i, input, axis);
+}
+
+semantics pure tt.histogram(source) {
+  import = and(rank(result, 1),
+               static_shape(result),
+               positive_dim(result, 0),
+               integer_bits(result, 32),
+               rank(source, 1),
+               static_shape(source),
+               positive_dim(source, 0),
+               integer_bits(source, 32));
+  candidate = and(offline_only(),
+                  rank(result, 1),
+                  static_shape(result),
+                  positive_dim(result, 0),
+                  integer_bits(result, 32),
+                  rank(source, 1),
+                  static_shape(source),
+                  positive_dim(source, 0),
+                  integer_bits(source, 32));
+  value = sum(i, source,
+              select(equal(at(source, i), result_index(0)), 1, 0));
+  valid = forall(i, source, valid_at(source, i));
+}
+
+semantics pure tt.histogram(source, mask) {
+  import = and(rank(result, 1),
+               static_shape(result),
+               positive_dim(result, 0),
+               integer_bits(result, 32),
+               rank(source, 1),
+               static_shape(source),
+               positive_dim(source, 0),
+               integer_bits(source, 32),
+               rank(mask, 1),
+               static_shape(mask),
+               integer_bits(mask, 1),
+               same_shape(source, mask),
+               same_encoding(source, mask));
+  candidate = and(target_compile_on_91095(),
+                  rank(result, 1),
+                  static_shape(result),
+                  positive_dim(result, 0),
+                  integer_bits(result, 32),
+                  rank(source, 1),
+                  static_shape(source),
+                  positive_dim(source, 0),
+                  integer_bits(source, 32),
+                  rank(mask, 1),
+                  static_shape(mask),
+                  integer_bits(mask, 1),
+                  same_shape(source, mask),
+                  same_encoding(source, mask));
+  value = sum(i, source,
+              select(and(at(mask, i),
+                         equal(at(source, i), result_index(0))),
+                     1, 0));
+  valid = forall(i, source,
+                 and(valid_at(mask, i),
+                     select(at(mask, i), valid_at(source, i), true)));
+}
+
+# Multi-result operations are defined as semantic projections. The generic
+# graph language carries the complete result signature, while result_index
+# chooses the Value/Valid denotation of one SSA result. No result is dropped.
+semantics pure arith.addui_extended(lhs, rhs) {
+  result_index = 0;
+  operation_results = tuple(same_as(lhs), bool_like(lhs));
+  import = and(semantic_result(0), integer_element(result),
+               same_type(result, lhs), same_type(result, rhs));
+  candidate = and(offline_only(), witnessed_operation(), semantic_result(0),
+                  integer_element(result), same_type(result, lhs),
+                  same_type(result, rhs));
+  value = add(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+semantics pure arith.addui_extended(lhs, rhs) {
+  result_index = 1;
+  operation_results = tuple(same_as(lhs), bool_like(lhs));
+  import = and(semantic_result(1), integer_bits(result, 1),
+               same_container(result, lhs), same_type(lhs, rhs));
+  candidate = and(offline_only(), witnessed_operation(), semantic_result(1),
+                  integer_bits(result, 1), same_container(result, lhs),
+                  same_type(lhs, rhs));
+  value = unsigned_add_overflow(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+semantics pure arith.mulsi_extended(lhs, rhs) {
+  result_index = 0;
+  operation_results = tuple(same_as(lhs), same_as(lhs));
+  import = and(semantic_result(0), integer_element(result),
+               same_type(result, lhs), same_type(result, rhs));
+  candidate = and(offline_only(), witnessed_operation(), semantic_result(0),
+                  integer_element(result), same_type(result, lhs),
+                  same_type(result, rhs));
+  value = mul(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+semantics pure arith.mulsi_extended(lhs, rhs) {
+  result_index = 1;
+  operation_results = tuple(same_as(lhs), same_as(lhs));
+  import = and(semantic_result(1), integer_element(result),
+               same_type(result, lhs), same_type(result, rhs));
+  candidate = and(offline_only(), witnessed_operation(), semantic_result(1),
+                  integer_element(result), same_type(result, lhs),
+                  same_type(result, rhs));
+  value = signed_multiply_high(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+semantics pure arith.mului_extended(lhs, rhs) {
+  result_index = 0;
+  operation_results = tuple(same_as(lhs), same_as(lhs));
+  import = and(semantic_result(0), integer_element(result),
+               same_type(result, lhs), same_type(result, rhs));
+  candidate = and(offline_only(), witnessed_operation(), semantic_result(0),
+                  integer_element(result), same_type(result, lhs),
+                  same_type(result, rhs));
+  value = mul(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}
+
+semantics pure arith.mului_extended(lhs, rhs) {
+  result_index = 1;
+  operation_results = tuple(same_as(lhs), same_as(lhs));
+  import = and(semantic_result(1), integer_element(result),
+               same_type(result, lhs), same_type(result, rhs));
+  candidate = and(offline_only(), witnessed_operation(), semantic_result(1),
+                  integer_element(result), same_type(result, lhs),
+                  same_type(result, rhs));
+  value = unsigned_multiply_high(value(lhs), value(rhs));
+  valid = and(valid(lhs), valid(rhs));
+}

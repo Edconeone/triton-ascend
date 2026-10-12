@@ -1,6 +1,10 @@
 // RUN: triton-opt %s --triton-to-unstructure='compile-on-910-95=true compile-mode=simd_simt_template' \
 // RUN:                --triton-to-linalg='compile-on-910-95=true compile-mode=simd_simt_template' --split-input-file \
 // RUN: | FileCheck %s
+// RUN: triton-opt %s --graph-optimize='rule-mask=4079' \
+// RUN:                --triton-to-unstructure='compile-on-910-95=true compile-mode=simd_simt_template' \
+// RUN:                --triton-to-linalg='compile-on-910-95=true compile-mode=simd_simt_template' --split-input-file \
+// RUN: | FileCheck %s --check-prefix=AXIS-OFF
 
 // -----
 // The `pid % S` strided block-pointer shape is owned by StridedAxisCoalescing,
@@ -13,6 +17,12 @@
 // CHECK: memref.reinterpret_cast
 // CHECK-SAME: sizes: [16, 4]
 // CHECK: memref.copy
+// AXIS-OFF-LABEL: module attributes {
+// AXIS-OFF-NOT: hacc.coalesce_factor
+// AXIS-OFF: hacc.auto_graph_solver_rule_mask = 4079 : i16
+// AXIS-OFF-LABEL: func.func @strided_axis_coalesce
+// AXIS-OFF-NOT: sizes: [16, 4]
+// AXIS-OFF: memref.copy
 module attributes {hacc.target = #hacc.target<"Ascend950PR_9579">} {
   tt.func public @strided_axis_coalesce(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32},
                                         %arg1: !tt.ptr<f32> {tt.divisibility = 16 : i32}) {

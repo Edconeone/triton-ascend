@@ -419,6 +419,43 @@ def Ascend_SelectOp : AscendModel_Op<"select", [Pure, DeclareOpInterfaceMethods<
   }];
 }
 
+def Ascend_HistogramOp : AscendModel_Op<"histogram", [Pure, DeclareOpInterfaceMethods<EstimateCyclesOpInterface, ["getFlops"]>]> {
+  let summary = "Masked or unmasked histogram on the AIV/SIMT path";
+  let description = [{
+    Cost-model representation of tt.histogram. The optional mask is carried by
+    the target operation, but its predicate filtering and masked-lane dispatch
+    still consume AIV/SIMT work and are charged by the target cost model.
+  }];
+
+  let arguments = (ins
+    AnyTensor:$input,
+    Optional<AnyTensor>:$mask,
+    OptionalAttr<I64Attr>:$estimated_cycles,
+    OptionalAttr<I64Attr>:$op_id
+  );
+
+  let results = (outs AnyTensor:$result);
+}
+
+def Ascend_ScanOp : AscendModel_Op<"scan", [Pure, DeclareOpInterfaceMethods<EstimateCyclesOpInterface, ["getFlops"]>]> {
+  let summary = "Associative prefix scan on the Vector path";
+  let description = [{
+    Cost-model representation of tt.scan after its canonical combiner region
+    has been classified. The combiner is data, not a workload-specific match.
+  }];
+
+  let arguments = (ins
+    AnyTensor:$input,
+    I64Attr:$axis,
+    BoolAttr:$reverse,
+    StrAttr:$combiner,
+    OptionalAttr<I64Attr>:$estimated_cycles,
+    OptionalAttr<I64Attr>:$op_id
+  );
+
+  let results = (outs AnyTensor:$result);
+}
+
 //===----------------------------------------------------------------------===//
 // Synchronization Operations
 //===----------------------------------------------------------------------===//

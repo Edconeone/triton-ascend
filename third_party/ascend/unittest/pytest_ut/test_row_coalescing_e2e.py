@@ -38,7 +38,17 @@ def row_coalescing_tail_copy(src, dst, n, BLOCK: tl.constexpr):
 
 
 @pytest.mark.parametrize("dtype", (torch.float32, torch.float16))
-def test_row_coalescing_tail_pure_simt_e2e(dtype):
+@pytest.mark.parametrize(
+    "rule_mask,expected_contract",
+    (
+        (4095, (8, 0, True)),
+        (4087, (1, -1, False)),
+    ),
+    ids=("all-rules", "all-minus-row"),
+)
+def test_row_coalescing_tail_pure_simt_e2e(
+    dtype, rule_mask, expected_contract, monkeypatch
+):
     # 19 is intentionally not divisible by the expected H=8 for a 16-element
     # base tile.  The compatibility pass must use the original ceil-div launch
     # contract and suppress stores for rows past ``n``.
@@ -46,13 +56,21 @@ def test_row_coalescing_tail_pure_simt_e2e(dtype):
     src = torch.arange(n, dtype=dtype).npu()
     dst = torch.full_like(src, -1)
 
-    row_coalescing_tail_copy[(n, )](
+    monkeypatch.setenv("TRITON_ALWAYS_COMPILE", "1")
+    monkeypatch.setenv("TRITON_ASCEND_GRAPH_EXPERIMENT_RULE_MASK", str(rule_mask))
+    row_coalescing_tail_copy.device_caches.clear()
+    compiled = row_coalescing_tail_copy[(n, )](
         src,
         dst,
         n,
         BLOCK=16,
         compile_mode="simt_only",
+        enable_graph_optimize=True,
     )
     torch.npu.synchronize()
 
     assert torch.equal(dst.cpu(), src.cpu())
+    factor, axis, ceil_div = expected_contract
+    assert compiled.metadata.coalesce_factor == factor
+    assert compiled.metadata.coalesce_axis == axis
+    assert compiled.metadata.coalesce_grid_ceil_div is ceil_div

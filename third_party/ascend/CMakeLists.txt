@@ -104,6 +104,11 @@ if(TRITON_ASCEND_ENABLE_COSTMODEL_INPROC)
 
     add_subdirectory(${_costmodel_include_dir} ${CMAKE_BINARY_DIR}/third_party/ascend/costmodel_build/include_AscendModel)
     add_subdirectory(${_costmodel_lib_dir} ${CMAKE_BINARY_DIR}/third_party/ascend/costmodel_build/lib_AscendModel)
+    if(TARGET TritonGraphStageCostModel)
+      add_dependencies(TritonGraphStageCostModel
+        AscendModelOpsIncGen
+        AscendModelTransformsPassIncGen)
+    endif()
     set(TRITON_ASCEND_HAS_INPROC_COSTMODEL 1)
   else()
     message(WARNING "Minimal costmodel sources not found under ${TRITON_ASCEND_COSTMODEL_SOURCE_DIR}; in-process costmodel bridge disabled")

@@ -2,6 +2,10 @@
 // RUN: | FileCheck %s
 // RUN: triton-opt %s --graph-optimize='rule-mask=0' --split-input-file \
 // RUN: | FileCheck %s --check-prefix=DISABLED
+// RUN: triton-opt %s --graph-optimize='rule-mask=768 max-rewrites-per-function=1' --split-input-file \
+// RUN: | FileCheck %s --check-prefix=GLOBAL-ONE
+// RUN: triton-opt %s --graph-optimize='rule-mask=768 max-rewrites-per-function=2' --split-input-file \
+// RUN: | FileCheck %s --check-prefix=GLOBAL-TWO
 
 // ConvertModuloToMask drops a modulo that only wraps tile addresses, so the
 // addresses stay linear, and gives the loads a boundary mask so the lanes that
@@ -25,9 +29,27 @@
 // CHECK-NOT: arith.remsi
 // DISABLED-LABEL: tt.func public @modulo_remsi_unmasked_load
 // DISABLED: arith.remsi
+// With one global rewrite slot, narrow-low-bits has benefit 6 and wins over
+// this modulo candidate's benefit 1. With two slots both candidates apply.
+// This locks down cost ordering across distinct rule providers, not a fixed
+// per-rule pass sequence.
+// GLOBAL-ONE-LABEL: tt.func public @modulo_remsi_unmasked_load
+// GLOBAL-ONE-NOT: arith.subi {{.*}} : tensor<16xi64>
+// GLOBAL-ONE: arith.subi {{.*}} : tensor<16xi32>
+// GLOBAL-ONE: arith.remsi
+// GLOBAL-TWO-LABEL: tt.func public @modulo_remsi_unmasked_load
+// GLOBAL-TWO-NOT: arith.subi {{.*}} : tensor<16xi64>
+// GLOBAL-TWO: arith.subi {{.*}} : tensor<16xi32>
+// GLOBAL-TWO-NOT: arith.remsi
+// GLOBAL-TWO: tt.return
 tt.func public @modulo_remsi_unmasked_load(%base: !tt.ptr<f16> {tt.divisibility = 16 : i32},
                                           %dst: !tt.ptr<f16> {tt.divisibility = 16 : i32},
-                                          %n: i32) {
+                                          %n: i32, %wide_lhs: tensor<16xi64>,
+                                          %wide_rhs: tensor<16xi64>) {
+  %wide_sub = arith.subi %wide_lhs, %wide_rhs : tensor<16xi64>
+  %narrow_sub = arith.trunci %wide_sub : tensor<16xi64> to tensor<16xi32>
+  %keep_narrow = arith.cmpi eq, %narrow_sub, %narrow_sub : tensor<16xi32>
+  tt.assert %keep_narrow, "keep solver cost candidate live" : tensor<16xi1>
   %c16 = arith.constant 16 : i32
   %pid = tt.get_program_id x : i32
   %blk = arith.muli %pid, %c16 : i32

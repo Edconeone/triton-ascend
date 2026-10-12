@@ -1,0 +1,54 @@
+{
+  "schema_version": 2,
+  "name": "ttir-stride-memory-rank1-v1",
+  "target": "ascend950dt",
+  "bounds": {
+    "max_nodes": 12,
+    "max_rank": 1,
+    "max_operands": 5,
+    "max_results": 1,
+    "max_shape_symbols": 0,
+    "allow_dynamic_shapes": false,
+    "allow_control_flow": false,
+    "allow_effects": true
+  },
+  "catalog_dialects": ["arith", "ascend", "tt"],
+  "operations": [
+    "ags.input",
+    "ags.memory",
+    "arith.addi",
+    "arith.cmpi",
+    "arith.extsi",
+    "arith.muli",
+    "ascend.stride_load",
+    "ascend.stride_store",
+    "tt.addptr",
+    "tt.load",
+    "tt.make_range",
+    "tt.splat",
+    "tt.store"
+  ],
+  "integer_bits": [1, 32, 64],
+  "floating_bits": [32],
+  "pointer_address_spaces": [1],
+  "integer_constants": [],
+  "tensor_shapes": [[4]],
+  "attribute_domains": {
+    "cmpi_predicate": [2],
+    "load_segments_other": [[1, 1, 1]],
+    "range_end": [4],
+    "range_start": [0]
+  },
+  "semantic_domains": [
+    "definedness",
+    "effect",
+    "index",
+    "layout",
+    "memory",
+    "shape",
+    "signature",
+    "value"
+  ]
+}
+
+

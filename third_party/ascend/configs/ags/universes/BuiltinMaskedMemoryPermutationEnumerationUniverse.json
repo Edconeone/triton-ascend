@@ -1,0 +1,54 @@
+{
+  "schema_version": 2,
+  "name": "masked-rank2-memory-permutation-closure-v1",
+  "target": "ascend950dt",
+  "bounds": {
+    "max_nodes": 5,
+    "max_rank": 2,
+    "max_operands": 4,
+    "max_results": 1,
+    "max_shape_symbols": 0,
+    "allow_dynamic_shapes": false,
+    "allow_control_flow": false,
+    "allow_effects": true
+  },
+  "catalog_dialects": ["tt"],
+  "operations": [
+    "ags.input",
+    "ags.memory",
+    "tt.load",
+    "tt.store",
+    "tt.trans"
+  ],
+  "integer_bits": [],
+  "floating_bits": [],
+  "pointer_address_spaces": [],
+  "integer_constants": [],
+  "tensor_shapes": [[8, 64], [64, 8]],
+  "explicit_types": [
+    "tensor<8x64xi1>",
+    "tensor<64x8xi1>",
+    "tensor<8x64xbf16>",
+    "tensor<64x8xbf16>",
+    "tensor<8x64x!tt.ptr<bf16>>",
+    "tensor<64x8x!tt.ptr<bf16>>"
+  ],
+  "attribute_domains": {
+    "load_segments_unmasked": [[1, 0, 0]],
+    "load_segments_masked": [[1, 1, 0]],
+    "load_segments_other": [[1, 1, 1]],
+    "transpose_order": [[1, 0]]
+  },
+  "semantic_domains": [
+    "signature",
+    "shape",
+    "index",
+    "layout",
+    "value",
+    "definedness",
+    "effect",
+    "memory"
+  ]
+}
+
+

@@ -25,7 +25,9 @@ import triton
 import triton.language as tl
 import test_common
 from unittest.mock import MagicMock
+from triton._C.libtriton import ir
 from triton.language.semantic import TritonSemantic
+from triton.backends.ascend.semantic import AscendSemantic
 
 
 @pytest.fixture(scope="function")
@@ -189,7 +191,8 @@ def test_dot_2_ignore_tf32(sigtype, B, C, D):
 def _make_mock_builder():
     builder = MagicMock()
     builder.options.default_dot_input_precision = "ieee"
-    builder.options.allowed_dot_input_precisions = ("ieee", "hf32")
+    # The common IR uses TF32; Ascend lowering turns it into backend HF32.
+    builder.options.allowed_dot_input_precisions = ("ieee", "tf32")
     builder.options.max_num_imprecise_acc_default = 0
     builder.codegen_fns = {"min_dot_size": MagicMock(return_value=(1, 1, 1))}
     builder.create_dot = MagicMock(return_value=MagicMock())
@@ -217,8 +220,7 @@ def _mock_tensor(dtype):
 
 
 class TestDotAscendPatch:
-    """Verify the monkey-patched TritonSemantic.dot is behaviourally
-    equivalent to the original intrusive code."""
+    """Verify Ascend dot behavior through the backend semantic object."""
 
     @pytest.fixture(autouse=True)
     def _setup(self):
@@ -232,7 +234,7 @@ class TestDotAscendPatch:
 
     @pytest.fixture
     def semantic(self):
-        semantic = MagicMock(spec=TritonSemantic)
+        semantic = MagicMock(spec=AscendSemantic)
         semantic.builder = _make_mock_builder()
         semantic._str_to_dot_input_precision = (lambda ip: TritonSemantic._str_to_dot_input_precision(semantic, ip))
         semantic.tensor = MagicMock(return_value=MagicMock())
@@ -244,18 +246,12 @@ class TestDotAscendPatch:
 
     def test_hf32_fp32_inputs_keep_hf32(self, semantic):
         """fp32 x fp32 + hf32 → hf32 is preserved."""
-        patched = TritonSemantic.dot
-        mock_original = MagicMock(return_value=MagicMock())
-        cell = patched.__closure__[0]
-        saved = cell.cell_contents
-        cell.cell_contents = mock_original
-        try:
-            lhs = _mock_tensor(tl.float32)
-            rhs = _mock_tensor(tl.float32)
-            patched(semantic, lhs, rhs, None, "hf32", None, tl.float32)
-            assert mock_original.call_args[0][4] == "hf32"
-        finally:
-            cell.cell_contents = saved
+        lhs = _mock_tensor(tl.float32)
+        rhs = _mock_tensor(tl.float32)
+        AscendSemantic.dot(semantic, lhs, rhs, None, "hf32", None, tl.float32)
+        # The common Triton IR keeps TF32; Ascend lowering emits the backend
+        # hf32 attribute later.
+        assert semantic.builder.create_dot.call_args[0][3] == ir.INPUT_PRECISION.TF32
 
     # ---- max_num_imprecise_acc ----
 
@@ -263,7 +259,7 @@ class TestDotAscendPatch:
         """Explicit max_num_imprecise_acc: warns, reaches create_dot as 0."""
         lhs = _mock_tensor(tl.float16)
         rhs = _mock_tensor(tl.float16)
-        TritonSemantic.dot(semantic, lhs, rhs, None, "ieee", 16, tl.float32)
+        AscendSemantic.dot(semantic, lhs, rhs, None, "ieee", 16, tl.float32)
 
         assert "max_num_imprecise_acc" in capsys.readouterr().out
         assert semantic.builder.create_dot.call_args[0][4] == 0
@@ -272,7 +268,7 @@ class TestDotAscendPatch:
         """None (default): no warning, reaches create_dot as 0."""
         lhs = _mock_tensor(tl.float16)
         rhs = _mock_tensor(tl.float16)
-        TritonSemantic.dot(semantic, lhs, rhs, None, "ieee", None, tl.float32)
+        AscendSemantic.dot(semantic, lhs, rhs, None, "ieee", None, tl.float32)
 
         assert "max_num_imprecise_acc" not in capsys.readouterr().out
         assert semantic.builder.create_dot.call_args[0][4] == 0

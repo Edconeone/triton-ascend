@@ -1,6 +1,10 @@
 // RUN: triton-opt %s --triton-to-unstructure='compile-on-910-95=true compile-mode=simd_simt_template' \
 // RUN:                --triton-to-linalg='compile-on-910-95=true compile-mode=simd_simt_template' --split-input-file \
 // RUN: | FileCheck %s
+// RUN: triton-opt %s --graph-optimize='rule-mask=4063' \
+// RUN:                --triton-to-unstructure='compile-on-910-95=true compile-mode=simd_simt_template' \
+// RUN:                --triton-to-linalg='compile-on-910-95=true compile-mode=simd_simt_template' --split-input-file \
+// RUN: | FileCheck %s --check-prefix=CHUNK-OFF
 
 // -----
 // Adjacent 16-f32 tiles form a small contiguous DMA. The pass should merge
@@ -11,6 +15,12 @@
 // CHECK: memref.reinterpret_cast
 // CHECK-SAME: sizes: [16, 16]
 // CHECK: memref.copy
+// CHUNK-OFF-LABEL: module attributes {
+// CHUNK-OFF-NOT: hacc.coalesce_factor
+// CHUNK-OFF: hacc.auto_graph_solver_rule_mask = 4063 : i16
+// CHUNK-OFF-LABEL: func.func @chunk_coalesce_simple
+// CHUNK-OFF-NOT: sizes: [16, 16]
+// CHUNK-OFF: memref.copy
 module attributes {hacc.target = #hacc.target<"Ascend950PR_9579">} {
   tt.func public @chunk_coalesce_simple(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32},
                                              %arg1: !tt.ptr<f32> {tt.divisibility = 16 : i32}) {

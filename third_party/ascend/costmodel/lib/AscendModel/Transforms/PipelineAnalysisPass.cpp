@@ -48,7 +48,8 @@ HWUnit getOpHWUnit(Operation *op) {
     return HWUnit::MTE3;
   if (isa<AddOp, SubOp, MulOp, DivOp, MaxOp, MinOp, ExpOp, LogOp, SqrtOp,
           RsqrtOp, TanhOp, SigmoidOp, NegOp, AbsOp, ReluOp, CastOp, ReduceSumOp,
-          ReduceMaxOp, ReduceMinOp, ReduceProdOp, BroadcastOp, SelectOp>(op))
+          ReduceMaxOp, ReduceMinOp, ReduceProdOp, BroadcastOp, SelectOp,
+          HistogramOp, ScanOp>(op))
     return HWUnit::Vector;
   return HWUnit::Scalar;
 }

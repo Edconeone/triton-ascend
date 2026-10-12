@@ -1,0 +1,38 @@
+{
+  "schema_version": 2,
+  "name": "ttir-atomic-state-enumeration-smoke-v1",
+  "target": "generic",
+  "bounds": {
+    "max_nodes": 2,
+    "max_rank": 0,
+    "max_operands": 4,
+    "max_input_symbols": 1,
+    "max_results": 1,
+    "max_shape_symbols": 0,
+    "allow_dynamic_shapes": false,
+    "allow_control_flow": false,
+    "allow_effects": true
+  },
+  "catalog_dialects": ["arith", "tt"],
+  "operations": [
+    "ags.input",
+    "ags.memory",
+    "ags.memory_after",
+    "arith.constant",
+    "tt.atomic_cas",
+    "tt.atomic_rmw"
+  ],
+  "integer_bits": [],
+  "floating_bits": [],
+  "pointer_address_spaces": [],
+  "integer_constants": [0, 1],
+  "tensor_shapes": [],
+  "explicit_types": ["i1", "i32", "!tt.ptr<i32, 1>"],
+  "attribute_domains": {
+    "atomic_rmw_op": [4],
+    "memory_scope": [1],
+    "memory_semantic": [1]
+  },
+  "semantic_domains": ["definedness", "effect", "index", "layout", "memory", "shape", "signature", "value"]
+}
+

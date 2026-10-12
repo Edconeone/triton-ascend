@@ -1,0 +1,37 @@
+{
+  "schema_version": 2,
+  "name": "ttir-region-enumeration-smoke-v1",
+  "target": "generic",
+  "bounds": {
+    "max_nodes": 1,
+    "max_rank": 1,
+    "max_operands": 1,
+    "max_results": 1,
+    "max_shape_symbols": 0,
+    "allow_dynamic_shapes": false,
+    "allow_control_flow": true,
+    "allow_effects": false
+  },
+  "catalog_dialects": ["tt", "arith"],
+  "operations": ["ags.input", "tt.scan", "tt.reduce"],
+  "integer_bits": [32],
+  "floating_bits": [],
+  "pointer_address_spaces": [],
+  "integer_constants": [],
+  "tensor_shapes": [[4]],
+  "attribute_domains": {
+    "axis": [0],
+    "reverse": [false, true]
+  },
+  "semantic_domains": [
+    "definedness",
+    "effect",
+    "index",
+    "layout",
+    "memory",
+    "shape",
+    "signature",
+    "value"
+  ]
+}
+

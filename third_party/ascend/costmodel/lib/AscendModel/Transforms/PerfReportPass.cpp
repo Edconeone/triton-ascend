@@ -35,7 +35,8 @@ static HWUnit getOpHWUnit(Operation *op) {
     return HWUnit::MTE3;
   if (isa<AddOp, SubOp, MulOp, DivOp, MaxOp, MinOp, ExpOp, LogOp, SqrtOp,
           RsqrtOp, TanhOp, SigmoidOp, NegOp, AbsOp, ReluOp, CastOp, ReduceSumOp,
-          ReduceMaxOp, ReduceMinOp, ReduceProdOp, BroadcastOp, SelectOp>(op))
+          ReduceMaxOp, ReduceMinOp, ReduceProdOp, BroadcastOp, SelectOp,
+          HistogramOp, ScanOp>(op))
     return HWUnit::Vector;
   return HWUnit::Scalar;
 }
@@ -99,7 +100,8 @@ struct PerfReportPass : public impl::PerfReportPassBase<PerfReportPass> {
         if (op->getNumResults() > 0) {
           totalFLOPs += getNumElementsFromType(op->getResult(0).getType()) * 10;
         }
-      } else if (isa<ReduceSumOp, ReduceMaxOp, ReduceMinOp, ReduceProdOp>(op)) {
+      } else if (isa<ReduceSumOp, ReduceMaxOp, ReduceMinOp, ReduceProdOp,
+                            HistogramOp, ScanOp>(op)) {
         if (op->getNumOperands() > 0) {
           totalFLOPs += getNumElementsFromType(op->getOperand(0).getType());
         }

@@ -265,6 +265,35 @@ def test_chunk_91095_native_metadata_launcher_and_ir(monkeypatch):
     assert not spec.flags & launcher_module.COALESCE_CEIL
 
 
+def test_chunk_91095_all_minus_rule_mask_keeps_original_grid(monkeypatch):
+    """The all-minus-P10 experiment must compile and run without grid shrink."""
+    batch, block, num_tiles = 2, 16, 32
+    n = block * num_tiles
+    src = torch.arange(batch * n, dtype=torch.float32).reshape(batch, n).npu()
+    dst = torch.empty_like(src)
+    monkeypatch.setenv("TRITON_ASCEND_GRAPH_EXPERIMENT_RULE_MASK", "4063")
+
+    compiled, observer = _launch_with_observer(
+        monkeypatch,
+        _chunk_axis1_copy,
+        (batch, num_tiles),
+        src,
+        dst,
+        N=n,
+        BLOCK=block,
+        force_simt_template=True,
+        sanitize_overflow=False,
+    )
+
+    assert torch.equal(dst.cpu(), src.cpu())
+    _assert_real_91095_gate(compiled, pure_simt=False)
+    assert compiled.metadata.coalesce_factor == 1
+    assert compiled.metadata.coalesce_axis == -1
+    assert compiled.metadata.coalesce_grid_ceil_div is False
+    assert all("hacc.coalesce_factor" not in text for text in observer.pre_export_ir)
+    assert all("gridY = gridY / 16;" not in text for text in observer.launcher_sources)
+
+
 def test_chunk_axis2_91095_native_metadata_launcher_and_ir(monkeypatch):
     """Chunk's real max-axis seed shrinks grid-Z with the floor-div ABI."""
     block, num_tiles = 16, 32

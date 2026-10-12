@@ -1,0 +1,66 @@
+{
+  "schema_version": 2,
+  "name": "linear-masked-memory-candidate-closure-v1",
+  "target": "ascend950dt",
+  "bounds": {
+    "max_nodes": 9,
+    "max_rank": 1,
+    "max_operands": 4,
+    "max_input_symbols": 3,
+    "max_effectful_nodes": 2,
+    "max_results": 1,
+    "max_shape_symbols": 0,
+    "allow_dynamic_shapes": false,
+    "allow_control_flow": false,
+    "allow_effects": true
+  },
+  "catalog_dialects": ["arith", "tt"],
+  "operations": [
+    "ags.input",
+    "ags.memory",
+    "arith.cmpi",
+    "tt.addptr",
+    "tt.load",
+    "tt.make_range",
+    "tt.splat",
+    "tt.store"
+  ],
+  "operation_operand_counts": {
+    "tt.load": [2],
+    "tt.store": [3]
+  },
+  "integer_bits": [],
+  "floating_bits": [],
+  "pointer_address_spaces": [],
+  "integer_constants": [],
+  "tensor_shapes": [[16]],
+  "explicit_types": [
+    "i32",
+    "!tt.ptr<f32>",
+    "tensor<16xi1>",
+    "tensor<16xi32>",
+    "tensor<16xf32>",
+    "tensor<16x!tt.ptr<f32>>"
+  ],
+  "input_symbol_types": ["!tt.ptr<f32>", "!tt.ptr<f32>", "i32"],
+  "attribute_domains": {
+    "cmpi_predicate": [2],
+    "load_segments_unmasked": [[1, 0, 0]],
+    "load_segments_masked": [[1, 1, 0]],
+    "load_segments_other": [[1, 1, 1]],
+    "range_end": [16],
+    "range_start": [0]
+  },
+  "semantic_domains": [
+    "signature",
+    "shape",
+    "index",
+    "layout",
+    "value",
+    "definedness",
+    "effect",
+    "memory"
+  ]
+}
+
+

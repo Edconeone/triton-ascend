@@ -1,0 +1,59 @@
+{
+  "schema_version": 2,
+  "name": "integer-value-tensor-candidate-closure-v2",
+  "target": "ascend950dt",
+  "bounds": {
+    "max_nodes": 3,
+    "max_rank": 1,
+    "max_operands": 3,
+    "max_results": 1,
+    "max_shape_symbols": 0,
+    "allow_dynamic_shapes": false,
+    "allow_control_flow": false,
+    "allow_effects": false
+  },
+  "catalog_dialects": ["arith", "tt"],
+  "operations": [
+    "ags.input",
+    "arith.addi",
+    "arith.andi",
+    "arith.cmpi",
+    "arith.constant",
+    "arith.extsi",
+    "arith.extui",
+    "arith.muli",
+    "arith.ori",
+    "arith.select",
+    "arith.shrsi",
+    "arith.shrui",
+    "arith.subi",
+    "arith.trunci",
+    "arith.xori",
+    "tt.splat"
+  ],
+  "integer_bits": [],
+  "floating_bits": [],
+  "pointer_address_spaces": [],
+  "integer_constants": [-1, 0, 1, 2, 7, 8, 16, 2147483648, 4294967295],
+  "tensor_shapes": [[16]],
+  "explicit_types": [
+    "tensor<16xi1>",
+    "tensor<16xi32>",
+    "tensor<16xi64>"
+  ],
+  "attribute_domains": {
+    "cmpi_predicate": [0, 2]
+  },
+  "semantic_domains": [
+    "signature",
+    "shape",
+    "index",
+    "layout",
+    "value",
+    "definedness",
+    "effect",
+    "memory"
+  ]
+}
+
+

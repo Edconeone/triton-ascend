@@ -1,0 +1,55 @@
+{
+  "schema_version": 2,
+  "name": "stage-buffer-merge-static-v1",
+  "target": "ascend950dt",
+  "bounds": {
+    "max_nodes": 10,
+    "max_rank": 1,
+    "max_operands": 4,
+    "max_results": 1,
+    "max_shape_symbols": 0,
+    "allow_dynamic_shapes": false,
+    "allow_control_flow": false,
+    "allow_effects": true
+  },
+  "catalog_dialects": ["bufferization", "memref", "tensor"],
+  "operations": [
+    "ags.buffer",
+    "ags.input",
+    "ags.private_buffer",
+    "bufferization.to_tensor",
+    "memref.copy",
+    "memref.subview",
+    "tensor.extract_slice",
+    "tensor.insert_slice"
+  ],
+  "integer_bits": [32],
+  "floating_bits": [],
+  "pointer_address_spaces": [],
+  "integer_constants": [],
+  "tensor_shapes": [[4], [8]],
+  "explicit_types": [
+    "memref<4xi32, strided<[1], offset: 4>>",
+    "memref<4xi32, strided<[1]>>",
+    "memref<8xi32>"
+  ],
+  "attribute_domains": {
+    "insert_slice_segments": [[1, 1, 0, 0, 0]],
+    "slice_offsets": [[0], [4]],
+    "slice_segments": [[1, 0, 0, 0]],
+    "slice_sizes": [[4]],
+    "slice_strides": [[1]]
+  },
+  "semantic_domains": [
+    "buffer",
+    "definedness",
+    "effect",
+    "index",
+    "layout",
+    "shape",
+    "signature",
+    "value"
+  ]
+}
+
+

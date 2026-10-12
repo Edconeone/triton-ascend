@@ -1,0 +1,51 @@
+{
+  "schema_version": 2,
+  "name": "ttir-store-coalescing-static-v1",
+  "target": "ascend950dt",
+  "bounds": {
+    "max_nodes": 8,
+    "max_rank": 1,
+    "max_operands": 4,
+    "max_results": 1,
+    "max_shape_symbols": 0,
+    "allow_dynamic_shapes": false,
+    "allow_control_flow": false,
+    "allow_effects": true
+  },
+  "catalog_dialects": ["arith", "tensor", "tt"],
+  "operations": [
+    "ags.input",
+    "ags.memory",
+    "tensor.empty",
+    "tensor.insert_slice",
+    "tt.addptr",
+    "tt.make_range",
+    "tt.splat",
+    "tt.store"
+  ],
+  "integer_bits": [32],
+  "floating_bits": [],
+  "pointer_address_spaces": [1],
+  "integer_constants": [],
+  "tensor_shapes": [[4], [8]],
+  "attribute_domains": {
+    "insert_slice_segments": [[1, 1, 0, 0, 0]],
+    "range_end": [4, 8],
+    "range_start": [0, 4],
+    "slice_offsets": [[0], [4]],
+    "slice_sizes": [[4]],
+    "slice_strides": [[1]]
+  },
+  "semantic_domains": [
+    "definedness",
+    "effect",
+    "index",
+    "layout",
+    "memory",
+    "shape",
+    "signature",
+    "value"
+  ]
+}
+
+

@@ -1,0 +1,52 @@
+{
+  "schema_version": 2,
+  "name": "ttir-indirect-memory-lowering-v1",
+  "target": "ascend950dt",
+  "bounds": {
+    "max_nodes": 3,
+    "max_rank": 1,
+    "max_operands": 4,
+    "max_results": 1,
+    "max_shape_symbols": 0,
+    "allow_dynamic_shapes": false,
+    "allow_control_flow": false,
+    "allow_effects": true
+  },
+  "catalog_dialects": ["ascend", "tt"],
+  "operations": [
+    "ags.input",
+    "ags.memory",
+    "ascend.indirect_load",
+    "ascend.indirect_store",
+    "tt.addptr",
+    "tt.load",
+    "tt.splat",
+    "tt.store"
+  ],
+  "integer_bits": [1, 32, 64],
+  "floating_bits": [32],
+  "pointer_address_spaces": [1],
+  "integer_constants": [],
+  "tensor_shapes": [[4]],
+  "attribute_domains": {
+    "indirect_load_segments_unmasked": [[1, 1, 0, 0]],
+    "indirect_load_segments_masked": [[1, 1, 1, 0]],
+    "indirect_load_segments_other": [[1, 1, 1, 1]],
+    "indirect_load_volatile": [false],
+    "load_segments_unmasked": [[1, 0, 0]],
+    "load_segments_masked": [[1, 1, 0]],
+    "load_segments_other": [[1, 1, 1]]
+  },
+  "semantic_domains": [
+    "definedness",
+    "effect",
+    "index",
+    "layout",
+    "memory",
+    "shape",
+    "signature",
+    "value"
+  ]
+}
+
+
