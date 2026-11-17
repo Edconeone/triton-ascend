@@ -1320,14 +1320,15 @@ template <typename CustomOpT>
 CustomOpT createRewrittenStructuredCustomOp(
     ConversionPatternRewriter &rewriter, Location loc,
     llvm::ArrayRef<Type> resultTypes, CustomOpT op,
-    typename CustomOpT::Adaptor &adaptor, ValueRange newOutputs) {
+    typename CustomOpT::Adaptor &adaptor, ValueRange newInputs,
+    ValueRange newOutputs) {
   if constexpr (std::is_same_v<CustomOpT, hivm::CustomMacroOp>) {
     return rewriter.create<hivm::CustomMacroOp>(
-        loc, resultTypes, op.getName(), adaptor.getInputs(), newOutputs,
+        loc, resultTypes, op.getName(), newInputs, newOutputs,
         adaptor.getTempBuffers(), adaptor.getSyncRelatedArgs());
   } else {
     return rewriter.create<hivm::CustomOp>(loc, resultTypes, op.getName(),
-                                           adaptor.getInputs(), newOutputs,
+                                           newInputs, newOutputs,
                                            adaptor.getTempBuffers());
   }
 }
@@ -1348,6 +1349,23 @@ void rewriteStructuredCustomOpImpl(CustomOpT op,
       }
       newOutputs.emplace_back(rewriter.getRemappedValue(out));
     }
+    // Preserve tensor operands so the downstream bufferization pass exposes
+    // the native i1 storage and descriptor to the custom ABI.
+    llvm::SmallVector<Value> newInputs(adaptor.getInputs().begin(),
+                                       adaptor.getInputs().end());
+    // A native i1 producer is lowered into a vector predicate buffer.  The
+    // custom library call consumes that buffer through a raw memref ABI, so
+    // make the producer-to-library ordering explicit.  Without this barrier
+    // the first predicate call can issue before the compare result is visible
+    // when its storage is reused with the compare operand.
+    if (llvm::any_of(newInputs, [](Value input) {
+          if (auto ty = dyn_cast<RankedTensorType>(input.getType()))
+            return ty.getElementType().isInteger(1);
+          return false;
+        }) && !isa<hivm::CustomOp, hivm::CustomMacroOp>(op->getPrevNode())) {
+      rewriter.create<hivm::PipeBarrierOp>(
+          loc, hivm::PipeAttr::get(rewriter.getContext(), hivm::PIPE::PIPE_ALL));
+    }
     llvm::SmallVector<Type> resultTypes;
     for (auto ty : op->getResultTypes()) {
       if (auto ptrTy = llvm::dyn_cast<triton::PointerType>(ty)) {
@@ -1365,8 +1383,8 @@ void rewriteStructuredCustomOpImpl(CustomOpT op,
       }
       resultTypes.emplace_back(ty);
     }
-    auto newOp = createRewrittenStructuredCustomOp(rewriter, loc, resultTypes,
-                                                   op, adaptor, newOutputs);
+    auto newOp = createRewrittenStructuredCustomOp(
+        rewriter, loc, resultTypes, op, adaptor, newInputs, newOutputs);
     auto operandSegmentSizesAttr = newOp->getAttr("operandSegmentSizes");
     newOp->setAttrs(op->getAttrs());
     newOp->setAttr("operandSegmentSizes", operandSegmentSizesAttr);
@@ -1375,8 +1393,22 @@ void rewriteStructuredCustomOpImpl(CustomOpT op,
   } else {
     SmallVector<Type> resultTypes(op->getResultTypes().begin(),
                                   op->getResultTypes().end());
+    // Preserve tensor operands so the native i1 descriptor reaches the custom
+    // call without a source-level i1->i8 materialization.
+    SmallVector<Value> newInputs(adaptor.getInputs().begin(),
+                                 adaptor.getInputs().end());
+    if (llvm::any_of(newInputs, [](Value input) {
+          if (auto ty = dyn_cast<RankedTensorType>(input.getType()))
+            return ty.getElementType().isInteger(1);
+          return false;
+        }) && !isa<hivm::CustomOp, hivm::CustomMacroOp>(op->getPrevNode())) {
+      rewriter.create<hivm::PipeBarrierOp>(
+          op.getLoc(),
+          hivm::PipeAttr::get(rewriter.getContext(), hivm::PIPE::PIPE_ALL));
+    }
     auto newOp = createRewrittenStructuredCustomOp(
-        rewriter, op.getLoc(), resultTypes, op, adaptor, adaptor.getOutputs());
+        rewriter, op.getLoc(), resultTypes, op,
+        adaptor, newInputs, adaptor.getOutputs());
     auto operandSegmentSizesAttr = newOp->getAttr("operandSegmentSizes");
     newOp->setAttrs(op->getAttrs());
     newOp->setAttr("operandSegmentSizes", operandSegmentSizesAttr);

@@ -157,12 +157,17 @@ AddPtrConverter::matchAndRewrite(triton::AddPtrOp op, OpAdaptor adaptor,
 
 LogicalResult LoadConverter::toTensorAndReplace(
     triton::LoadOp &op, RankedTensorType &tensorType, Value localMem,
-    bool mayImplicitTransposeWithLastAxis, const Location &loc,
+    bool boolStorage, bool mayImplicitTransposeWithLastAxis,
+    const Location &loc,
     ConversionPatternRewriter &rewriter) const {
   Value loadedTensor = rewriter.create<bufferization::ToTensorOp>(
       loc, tensorType, localMem, true, true);
-  propagateWasBoolToInt8Attr(op.getOperation(), loadedTensor.getDefiningOp(),
-                             rewriter);
+
+  if (boolStorage) {
+    auto logicalType = cast<RankedTensorType>(op.getResult().getType());
+    loadedTensor = rewriter.create<arith::TruncIOp>(loc, logicalType,
+                                                    loadedTensor);
+  }
 
   if (mayImplicitTransposeWithLastAxis) {
     auto markOp = rewriter.create<annotation::MarkOp>(loc, loadedTensor);
@@ -196,16 +201,6 @@ LoadConverter::checkModifiedByAddPtrConverter(triton::LoadOp &op) const {
   return success();
 }
 
-void LoadConverter::propagateWasBoolToInt8Attr(
-    Operation *srcLoadOp, Operation *dstOp, PatternRewriter &rewriter) const {
-  const std::string WasBoolToInt8TAG = "was_bool_to_int8";
-  if (!srcLoadOp || !dstOp)
-    return;
-  if (srcLoadOp->hasAttr(WasBoolToInt8TAG)) {
-    dstOp->setAttr(WasBoolToInt8TAG, rewriter.getBoolAttr(true));
-  }
-}
-
 /// @brief Continue to modify the triton::LoadOp from the state modified by the
 /// AddPtrConverter.
 /// @param op The triton::LoadOp operation to be processed.
@@ -231,8 +226,14 @@ LogicalResult LoadConverter::continueModifyFromAddPtrConverter(
       rewriter.create<arith::ConstantOp>(loc, rewriter.getIndexAttr(0));
   Value loadVal =
       rewriter.create<memref::LoadOp>(loc, castVal, ValueRange{idxZero});
-  propagateWasBoolToInt8Attr(op.getOperation(), loadVal.getDefiningOp(),
-                             rewriter);
+  // The pointer materialization path keeps GM i1 storage as i8.  Restore the
+  // logical predicate element before inserting it into the loop-carried
+  // tensor; otherwise this scalarized path bypasses the regular load bridge.
+  if (auto iterTensorTy = dyn_cast<RankedTensorType>(iterArg.getType())) {
+    Type logicalElemTy = iterTensorTy.getElementType();
+    if (loadVal.getType().isInteger(8) && logicalElemTy.isInteger(1))
+      loadVal = rewriter.create<arith::TruncIOp>(loc, logicalElemTy, loadVal);
+  }
   Value insertedVal =
       rewriter.create<tensor::InsertOp>(loc, loadVal, iterArg, ValueRange{ivs});
   // a yield op is already created by AddPtrConverter.
@@ -261,6 +262,20 @@ void LoadConverter::fillTensorWithOtherForMaskScenario(
   assert(originalType.hasStaticShape() && "only support static shape");
   assert(originalType.getRank() == maskDim.size() &&
          "shape and mask must have same rank");
+
+  // Boolean GM buffers use i8 storage while the logical tensor stays i1.
+  // The fill writes the storage memref directly, so widen a logical i1
+  // `other` value before creating linalg.fill.  Without this bridge the
+  // generated IR contains linalg.fill i1 -> memref<i8>, which is rejected by
+  // the HIVM verifier.
+  Type storageElem = originalType.getElementType();
+  if (other.getType() != storageElem) {
+    if (other.getType().isInteger(1) && storageElem.isInteger(8)) {
+      other = rewriter.create<arith::ExtUIOp>(loc, storageElem, other);
+    } else {
+      assert(false && "masked-load fill value must match storage element type");
+    }
+  }
 
   auto fillFlag =
       rewriter.create<arith::ConstantOp>(loc, rewriter.getBoolAttr(false))
@@ -347,10 +362,20 @@ LogicalResult LoadConverter::replaceMaskedLoadWithTensorOther(
         "replaceMaskedLoadWithTensorOther requires non-null mask and other");
   }
 
+  auto allocType = cast<MemRefType>(alloc.getType());
+  bool boolStorage = allocType.getElementType().isInteger(8) &&
+                     tensorType.getElementType().isInteger(1);
+  auto storageTensorType = boolStorage
+                               ? RankedTensorType::get(
+                                     tensorType.getShape(),
+                                     rewriter.getI8Type(),
+                                     tensorType.getEncoding())
+                               : tensorType;
   Value loadedTensor = rewriter.create<bufferization::ToTensorOp>(
-      loc, tensorType, alloc, true, true);
-  propagateWasBoolToInt8Attr(op.getOperation(), loadedTensor.getDefiningOp(),
-                             rewriter);
+      loc, storageTensorType, alloc, true, true);
+  if (boolStorage)
+    loadedTensor = rewriter.create<arith::TruncIOp>(loc, tensorType,
+                                                    loadedTensor);
   if (mayImplicitTransposeWithLastAxis) {
     auto markOp = rewriter.create<annotation::MarkOp>(loc, loadedTensor);
     markOp->setAttr(MayImplicitTransposeWithLastAxisTAG,
@@ -473,14 +498,21 @@ LoadConverter::matchAndRewrite(triton::LoadOp op, OpAdaptor adaptor,
     }
 
     auto resTy = op.getResult().getType();
+    bool boolStorage = resTy.isInteger(1) &&
+                       cast<MemRefType>(scalarMemref.getType())
+                           .getElementType()
+                           .isInteger(8);
     auto idxZero =
         rewriter.create<arith::ConstantOp>(loc, rewriter.getIndexAttr(0));
     auto createScalarLoad = [&]() -> Value {
-      auto load = rewriter.create<memref::LoadOp>(loc, resTy, scalarMemref,
-                                                  idxZero.getResult());
-      propagateWasBoolToInt8Attr(op.getOperation(), load.getOperation(),
-                                 rewriter);
-      return load.getResult();
+      Type storageTy = boolStorage ? rewriter.getI8Type() : resTy;
+      auto loadOp = rewriter.create<memref::LoadOp>(loc, storageTy,
+                                                    scalarMemref,
+                                                    idxZero.getResult());
+      Value load = loadOp.getResult();
+      if (boolStorage)
+        return rewriter.create<arith::TruncIOp>(loc, resTy, load);
+      return load;
     };
     if (!mask) {
       rewriter.replaceOp(op, createScalarLoad());
@@ -550,6 +582,8 @@ LoadConverter::matchAndRewrite(triton::LoadOp op, OpAdaptor adaptor,
        mlir::ConverterUtils::isaPermutedMemRefType(memRefType));
   auto memRefShape = memRefType.getShape();
   auto memRefElementType = memRefType.getElementType();
+  bool boolStorage = memRefElementType.isInteger(8) &&
+                     getElementTypeOrSelf(op.getResult().getType()).isInteger(1);
 
   Value allocOp;
   Value allocOpTmp;
@@ -589,10 +623,17 @@ LoadConverter::matchAndRewrite(triton::LoadOp op, OpAdaptor adaptor,
     allocOp = rewriter.create<memref::AllocOp>(loc, fullMemRefType);
     allocOpTmp = allocOp;
     rewriter.setInsertionPointAfter(loop);
-    auto toTensorOp = rewriter.create<bufferization::ToTensorOp>(
-        loc, RankedTensorType::get(fullMemRefShape, memRefElementType), allocOp,
-        true, true);
-    rewriter.replaceAllUsesWith(loopOp->getResult(0), toTensorOp->getResult(0));
+    auto storageTensorType =
+        RankedTensorType::get(fullMemRefShape, memRefElementType);
+    Value loopTensor = rewriter.create<bufferization::ToTensorOp>(
+        loc, storageTensorType, allocOp, true, true);
+    if (boolStorage) {
+      auto logicalTensorType = cast<RankedTensorType>(
+          loopOp->getResult(0).getType());
+      loopTensor = rewriter.create<arith::TruncIOp>(
+          loc, logicalTensorType, loopTensor);
+    }
+    rewriter.replaceAllUsesWith(loopOp->getResult(0), loopTensor);
     auto offsets = insertSliceOp.getMixedOffsets();
     auto sizes = insertSliceOp.getMixedSizes();
     auto strides = insertSliceOp.getMixedStrides();
@@ -671,15 +712,13 @@ LoadConverter::matchAndRewrite(triton::LoadOp op, OpAdaptor adaptor,
         ptr, srcOffsets, boundarySizes, loc, rewriter);
     auto dstSubview = mlir::ConverterUtils::makeSubViewOp(
         allocOp, dstOffsets, boundarySizes, loc, rewriter);
-    auto copyOp = rewriter.create<memref::CopyOp>(loc, srcSubView, dstSubview);
-    propagateWasBoolToInt8Attr(op.getOperation(), copyOp.getOperation(),
-                               rewriter);
+    rewriter.create<memref::CopyOp>(loc, srcSubView, dstSubview);
     if (mayImplicitTransposeWithLastAxis) {
       auto markOp = rewriter.create<annotation::MarkOp>(loc, dstSubview);
       markOp->setAttr(MayImplicitTransposeWithLastAxisTAG,
                       UnitAttr::get(rewriter.getContext()));
     }
-    return this->toTensorAndReplace(op, tensorType, allocOp,
+    return this->toTensorAndReplace(op, tensorType, allocOp, boolStorage,
                                     mayImplicitTransposeWithLastAxis, loc,
                                     rewriter);
   }
@@ -696,15 +735,14 @@ LoadConverter::matchAndRewrite(triton::LoadOp op, OpAdaptor adaptor,
       // If last dimension stride equals 2, try deinterleave optimization.
       auto [ptrStrides, ptrOffsets] = memRefType.getStridesAndOffset();
       if (ptrStrides.back() == 2 && (memRefShape.back() % 2 == 0) &&
+          !boolStorage &&
           !skipNonComplementaryStaticDeinterleave(op) &&
           mlir::triton::DeinterleaveStatusOptimization(op, adaptor, rewriter,
                                                        writebackDest)
               .succeeded()) {
         return success();
       }
-      auto copyOp = rewriter.create<memref::CopyOp>(loc, ptr, allocOp);
-      propagateWasBoolToInt8Attr(op.getOperation(), copyOp.getOperation(),
-                                 rewriter);
+      rewriter.create<memref::CopyOp>(loc, ptr, allocOp);
       if (mayImplicitTransposeWithLastAxis &&
           allocOp.getDefiningOp<memref::AllocOp>()) {
         auto markOp = rewriter.create<annotation::MarkOp>(loc, allocOp);
@@ -718,7 +756,7 @@ LoadConverter::matchAndRewrite(triton::LoadOp op, OpAdaptor adaptor,
       }
     }
 
-    return this->toTensorAndReplace(op, tensorType, allocOp,
+    return this->toTensorAndReplace(op, tensorType, allocOp, boolStorage,
                                     mayImplicitTransposeWithLastAxis, loc,
                                     rewriter);
   }
@@ -757,6 +795,7 @@ LoadConverter::matchAndRewrite(triton::LoadOp op, OpAdaptor adaptor,
       isConstantIntValue(mstate.dims.back(), memRefType.getShape().back())) {
     auto [ptrStrides, ptrOffsets] = memRefType.getStridesAndOffset();
     if (ptrStrides.back() == 2 && (memRefType.getShape().back() % 2 == 0) &&
+        !boolStorage &&
         DeinterleaveStatusWithMaskOptimization(op, adaptor, rewriter, mstate,
                                                allocOp, writebackDest)
             .succeeded()) {
@@ -781,9 +820,7 @@ LoadConverter::matchAndRewrite(triton::LoadOp op, OpAdaptor adaptor,
           makeStridedLinearLayoutMap(srcStrides, srcOffset,
                                      rewriter.getContext()));
       auto castOp = rewriter.create<memref::CastOp>(loc, castType, dstSubView);
-      auto copyOp = rewriter.create<memref::CopyOp>(loc, srcSubView, castOp);
-      propagateWasBoolToInt8Attr(op.getOperation(), copyOp.getOperation(),
-                                 rewriter);
+      rewriter.create<memref::CopyOp>(loc, srcSubView, castOp);
     }
 
     if (mayImplicitTransposeWithLastAxis &&
@@ -800,7 +837,7 @@ LoadConverter::matchAndRewrite(triton::LoadOp op, OpAdaptor adaptor,
   }
 
   if (!tensorOtherBase) {
-    return this->toTensorAndReplace(op, tensorType, allocOp,
+    return this->toTensorAndReplace(op, tensorType, allocOp, boolStorage,
                                     mayImplicitTransposeWithLastAxis, loc,
                                     rewriter);
   }
@@ -1499,6 +1536,23 @@ StoreConverter::matchAndRewrite(triton::StoreOp op, OpAdaptor adaptor,
     return rewriter.notifyMatchFailure(
         op, "unable to materialize the store pointer as a memref");
   ptr = *resolvedPtr;
+
+  // GM pointers keep the byte ABI for i1 values, while the Triton value stays
+  // a predicate tensor until this boundary.  Widen only the value consumed by
+  // the byte destination; comparisons and predicate operations remain i1.
+  if (auto ptrType = dyn_cast<MemRefType>(ptr.getType())) {
+    if (ptrType.getElementType().isInteger(8) &&
+        getElementTypeOrSelf(val.getType()).isInteger(1)) {
+      if (auto tensorType = dyn_cast<RankedTensorType>(val.getType())) {
+        auto storageType = RankedTensorType::get(
+            tensorType.getShape(), rewriter.getI8Type(),
+            tensorType.getEncoding());
+        val = rewriter.create<arith::ExtUIOp>(loc, storageType, val);
+      } else if (val.getType().isInteger(1)) {
+        val = rewriter.create<arith::ExtUIOp>(loc, rewriter.getI8Type(), val);
+      }
+    }
+  }
   // 1. boundary size check
   auto boundaryCheck = op.getBoundaryCheck();
   if (!boundaryCheck.empty()) {

@@ -587,6 +587,25 @@ static bool collectSimtRequirements(ModuleOp moduleOp) {
 
 namespace {
 
+// Pointer pointees of type i1 use byte storage in GM.  Some masked-load
+// canonicalization patterns materialize the inactive value as a scalar i1
+// fill before the memory conversion has consumed the load.  Repair that
+// boundary here so the final linalg.fill operand matches memref<i8>.
+static void repairBooleanMemrefFills(ModuleOp moduleOp) {
+  moduleOp.walk([&](linalg::FillOp fill) {
+    if (fill.getInputs().empty() || fill.getOutputs().empty())
+      return;
+    auto outMemref = dyn_cast<MemRefType>(fill.getOutputs().front().getType());
+    if (!outMemref || !outMemref.getElementType().isInteger(8) ||
+        !fill.getInputs().front().getType().isInteger(1))
+      return;
+    OpBuilder builder(fill);
+    Value widened = builder.create<arith::ExtUIOp>(
+        fill.getLoc(), outMemref.getElementType(), fill.getInputs().front());
+    fill->setOperand(0, widened);
+  });
+}
+
 static Type normalizeMemoryElementType(Type elementType, MLIRContext *context) {
   if (auto intType = dyn_cast<IntegerType>(elementType);
       intType && intType.getWidth() == 1)
@@ -651,15 +670,10 @@ TritonTypeConverter::TritonTypeConverter() {
     if (auto ptrType = dyn_cast<triton::PointerType>(elemType)) {
       elemType = ptrType.getPointeeType();
     }
-    // Handling special case: tensor<i1> -> memref<?x i8>
-    Type originalElemType = elemType;
-    elemType = normalizeMemoryElementType(elemType, tensorType.getContext());
-    LLVM_DEBUG({
-      if (elemType != originalElemType)
-        llvm::dbgs() << "[TritonTypeConverter] Normalize i1 tensor to i8 "
-                        "memref. elemType="
-                     << elemType << "\n";
-    });
+    // Keep plain i1 tensors as predicate storage.  Only pointer pointees use
+    // the byte ABI above; a numerical tensor<i1> is a predicate value and
+    // must reach the AVE predicate lowering without an element-wise i8
+    // materialization.
     return MemRefType::get(tensorType.getShape(), elemType);
   });
 
@@ -668,7 +682,7 @@ TritonTypeConverter::TritonTypeConverter() {
   // changes the corresponding argument to a memref. Materialize only the
   // canonical numerical memref-to-ranked-tensor pair produced by the
   // conversion above. The exact type check deliberately excludes pointer
-  // tensors, encoded tensors, i1-to-i8 normalization, non-identity layouts,
+  // tensors, encoded tensors, non-identity layouts,
   // and non-default memory spaces, so this does not become a general SCF
   // type-conversion path.
   addSourceMaterialization([](OpBuilder &builder, RankedTensorType resultType,
@@ -1982,6 +1996,7 @@ void TritonToLinalgPass::runOnOperation() {
     signalPassFailure();
     return;
   }
+  repairBooleanMemrefFills(moduleOp);
   // Without input source locations, there is nothing useful to recover.
   if (inputHasSourceLocation)
     repairUnknownLocations(moduleOp);

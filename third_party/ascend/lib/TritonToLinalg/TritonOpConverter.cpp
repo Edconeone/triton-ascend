@@ -2692,17 +2692,18 @@ MatmulConverter::matchAndRewrite(triton::DotOp op, OpAdaptor adaptor,
   auto dstType = cast<RankedTensorType>(op.getType());
   auto elemTy = dstType.getElementType();
   auto inputPrec = op.getInputPrecision();
-  // Ascend does not support tf32;  map it to hf32 which provides similar
-  // functionality.HF32 is only valid for fp32 x fp32 inputs; for other
-  // dtypes, fall back to ieee.
+  // The current Triton enum has no HF32 member, while the Ascend matmul
+  // backend still consumes the string-valued HF32 precision. Keep that
+  // backend spelling without injecting a non-existent enum value into the
+  // frontend dialect.
+  bool useHF32 = false;
   if (inputPrec == InputPrecision::TF32) {
     op->emitWarning("Ascend does not support tf32; map it to hf32.");
-    inputPrec = InputPrecision::HF32;
-  }
-  if (inputPrec == InputPrecision::HF32) {
     auto opaElemTy = cast<RankedTensorType>(opa.getType()).getElementType();
     auto opbElemTy = cast<RankedTensorType>(opb.getType()).getElementType();
-    if (!opaElemTy.isF32() || !opbElemTy.isF32()) {
+    if (opaElemTy.isF32() && opbElemTy.isF32()) {
+      useHF32 = true;
+    } else {
       inputPrec = InputPrecision::IEEE;
     }
   }
@@ -2743,8 +2744,10 @@ MatmulConverter::matchAndRewrite(triton::DotOp op, OpAdaptor adaptor,
   } else {
     matmulOp = replaceOp(rewriter, ValueRange{opa, opb}, ValueRange{opc});
   }
+  auto precisionName = useHF32 ? StringRef("HF32")
+                               : stringifyInputPrecision(inputPrec);
   matmulOp->setAttr("input_precision",
-                    rewriter.getStringAttr(stringifyInputPrecision(inputPrec)));
+                    rewriter.getStringAttr(precisionName));
   return success();
 }
 
@@ -4045,9 +4048,6 @@ LogicalResult IndexSelectSimdConverter::matchAndRewrite(
 
   // Get result type
   auto resultTensorType = cast<RankedTensorType>(op.getResult().getType());
-  static constexpr llvm::StringLiteral wasBoolToInt8AttrName =
-      "was_bool_to_int8";
-  bool wasBoolToInt8 = op->hasAttr(wasBoolToInt8AttrName);
 
   auto elemType = resultTensorType.getElementType();
   auto resultShape = resultTensorType.getShape();
@@ -4056,6 +4056,13 @@ LogicalResult IndexSelectSimdConverter::matchAndRewrite(
   // src is now memref<?xT> after type conversion, need to reinterpret to full
   // shape
   auto srcMemRefType = cast<MemRefType>(src.getType());
+  // Pointer<i1> keeps the byte storage ABI at the GM boundary, while the
+  // extension result remains a logical predicate tensor.  Carry the source
+  // and destination through the copy as bytes, then truncate once at the
+  // tensor boundary instead of widening the predicate value in Python.
+  bool boolStorage = elemType.isInteger(1) &&
+                     srcMemRefType.getElementType().isInteger(8);
+  Type storageElemType = boolStorage ? rewriter.getI8Type() : elemType;
 
   // DenseI32ArrayAttr can be implicitly converted to ArrayRef<int32_t>
   ArrayRef<int32_t> readShape = readShapeAttr;
@@ -4097,7 +4104,7 @@ LogicalResult IndexSelectSimdConverter::matchAndRewrite(
     }
     staticSizes.push_back(staticSize);
   }
-  auto fullSrcMemRefType = MemRefType::get(fullSrcShape, elemType);
+  auto fullSrcMemRefType = MemRefType::get(fullSrcShape, storageElemType);
 
   // Build static offsets, sizes, and strides for ReinterpretCastOp
   SmallVector<Value> offsets, strides;
@@ -4143,7 +4150,7 @@ LogicalResult IndexSelectSimdConverter::matchAndRewrite(
       staticSizes, staticStrides);
 
   // Allocate output buffer
-  auto resultMemRefType = MemRefType::get(resultShape, elemType);
+  auto resultMemRefType = MemRefType::get(resultShape, storageElemType);
   auto outputBuffer = rewriter.create<memref::AllocOp>(loc, resultMemRefType);
 
   // Get indices tensor type for extracting
@@ -4224,8 +4231,6 @@ LogicalResult IndexSelectSimdConverter::matchAndRewrite(
     // For index_select on the trailing axis, mark as discrete memory access
     // This degrades to scalar read/write handling to avoid alignment issues
     auto copyOp = rewriter.create<memref::CopyOp>(loc, srcSubview, dstSubview);
-    if (wasBoolToInt8)
-      copyOp->setAttr(wasBoolToInt8AttrName, rewriter.getBoolAttr(true));
     copyOp->setAttr(ConverterUtils::discreteAttrName, rewriter.getUnitAttr());
   } else {
     // For index_select on non-trailing axes, add stride alignment annotation
@@ -4238,22 +4243,30 @@ LogicalResult IndexSelectSimdConverter::matchAndRewrite(
                        rewriter.getDenseI32ArrayAttr({32}));
 
     // Copy from source to destination
-    auto copyOp = rewriter.create<memref::CopyOp>(loc, srcSubview, dstSubview);
-    if (wasBoolToInt8)
-      copyOp->setAttr(wasBoolToInt8AttrName, rewriter.getBoolAttr(true));
+    rewriter.create<memref::CopyOp>(loc, srcSubview, dstSubview);
   }
 
   // Restore insertion point
   rewriter.restoreInsertionPoint(savedInsertionPoint);
 
   // Convert memref to tensor
-  auto resultTensor = rewriter.create<bufferization::ToTensorOp>(
-      loc, resultTensorType, outputBuffer, true, true);
-  if (wasBoolToInt8)
-    resultTensor->setAttr(wasBoolToInt8AttrName, rewriter.getBoolAttr(true));
+  Value resultTensor;
+  if (boolStorage) {
+    auto storageTensorType = RankedTensorType::get(
+        resultTensorType.getShape(), storageElemType,
+        resultTensorType.getEncoding());
+    auto byteTensor = rewriter.create<bufferization::ToTensorOp>(
+        loc, storageTensorType, outputBuffer, true, true);
+    resultTensor = rewriter.create<arith::TruncIOp>(loc, resultTensorType,
+                                                    byteTensor);
+  } else {
+    resultTensor = rewriter.create<bufferization::ToTensorOp>(
+        loc, resultTensorType, outputBuffer, true, true);
+  }
 
   // Mark as index_select_simd
-  resultTensor->setAttr("index_select_simd", rewriter.getUnitAttr());
+  resultTensor.getDefiningOp()->setAttr("index_select_simd",
+                                        rewriter.getUnitAttr());
 
   // Replace the original op
   rewriter.replaceOp(op, resultTensor);
