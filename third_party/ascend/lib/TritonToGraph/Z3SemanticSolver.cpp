@@ -677,8 +677,10 @@ public:
         lastUnknownReason = worker->solver.reason_unknown();
       if (status != z3::unknown)
         return status;
-      if (lastUnknownReason.find("timeout") == std::string::npos &&
-          lastUnknownReason != "canceled")
+      bool retryableUnknown =
+          lastUnknownReason.find("timeout") != std::string::npos ||
+          lastUnknownReason == "canceled" || lastUnknownReason == "incomplete";
+      if (!retryableUnknown)
         return status;
 
       if (retryTimeoutMilliseconds > timeoutMilliseconds) {
@@ -726,6 +728,34 @@ public:
         } else {
           ++bitBlastUnknown;
           lastUnknownReason = bitBlastSolver.reason_unknown();
+        }
+      }
+
+      // The regular solver can report "incomplete" for formulas in the
+      // quantifier-free AUF+BV fragment.  This is common for semantic
+      // denotations containing MemoryRead/MemoryValid uninterpreted
+      // functions: plain bit-blasting cannot eliminate those functions, but
+      // Z3's dedicated qfaufbv tactic can decide the same formula.  Run it
+      // for every remaining unknown result, including incomplete results, so
+      // the offline proof stage does not leave a resolvable pair pending.
+      if (status == z3::unknown) {
+        acquireBitBlastWorker();
+        auto releaseQfaufbvWorkerOnExit =
+            llvm::make_scope_exit([&] { releaseBitBlastWorker(); });
+        z3::tactic qfaufbv(worker->context, "qfaufbv");
+        z3::solver qfaufbvSolver = qfaufbv.mk_solver();
+        z3::params parameters(worker->context);
+        unsigned qfaufbvTimeoutMilliseconds = std::max(
+            timeoutMilliseconds,
+            std::max(retryTimeoutMilliseconds, bitBlastTimeoutMilliseconds));
+        parameters.set("timeout", qfaufbvTimeoutMilliseconds);
+        qfaufbvSolver.set(parameters);
+        qfaufbvSolver.add(simplified);
+        status = qfaufbvSolver.check();
+        if (status == z3::sat) {
+          lastCounterexampleModel = qfaufbvSolver.get_model().to_string();
+        } else if (status == z3::unknown) {
+          lastUnknownReason = qfaufbvSolver.reason_unknown();
         }
       }
       return status;
