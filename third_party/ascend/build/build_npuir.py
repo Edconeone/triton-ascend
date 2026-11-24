@@ -18,7 +18,7 @@ def _log(msg):
 
 
 def _is_git_repo(dir_path):
-    return (Path(dir_path) / ".git").is_dir()
+    return (Path(dir_path) / ".git").exists()
 
 
 def _check_disk_space(min_free_gb=_MIN_FREE_DISK_GB):

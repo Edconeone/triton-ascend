@@ -803,7 +803,9 @@ def linalg_to_bin_enable_npu_compile_910_95(linalg: str, metadata, opt):
         ]
 
         if _check_bishengir_supports_optimized_metaop():
-            _compile_option_list += [f"--enable-optimized-metaop={is_cann_version_at_least(9, 2, 0)}"]
+            optimized_metaop = (metadata.get("kernel_name") == "_mxfp8_grouped_matmul_quantized_return_kernel"
+                                or is_cann_version_at_least(9, 2, 0))
+            _compile_option_list += [f"--enable-optimized-metaop={str(optimized_metaop).lower()}"]
 
         npu_utils = NPUUtils()
         if npu_utils.has_device_limit():

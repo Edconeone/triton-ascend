@@ -48,7 +48,7 @@ def _set_default_env_vars():
 
 
 def _is_git_repo():
-    return (_REPO_ROOT / ".git").is_dir()
+    return (_REPO_ROOT / ".git").exists()
 
 
 def _is_linux_os(os_id):
@@ -313,6 +313,12 @@ def _ensure_npuir_submodule():
     build_npuir()
 
 
+def _distributed_package_dir():
+    if os.getenv("TRITON_DISTRIBUTED_ASCEND_SRC_DIR"):
+        return os.path.join("build", "external-triton-dist")
+    return os.path.join("third_party", "ascend", "Triton-distributed-ascend", "python", "triton_dist")
+
+
 def _ensure_distributed_submodule():
     if os.getenv("TRITON_BUILD_TD", "OFF").upper() not in ["ON", "1", "YES", "TRUE", "Y"]:
         return
@@ -325,6 +331,17 @@ def _ensure_distributed_submodule():
             raise RuntimeError(
                 "TRITON_DISTRIBUTED_ASCEND_SRC_DIR must name a "
                 "Triton-distributed-ascend source tree")
+        package = distributed_dir / "python" / "triton_dist"
+        if not (package / "__init__.py").is_file():
+            raise RuntimeError(f"Missing triton_dist package in {distributed_dir}")
+        # setuptools requires package_dir to point inside its project tree.
+        link = _REPO_ROOT / _distributed_package_dir()
+        link.parent.mkdir(parents=True, exist_ok=True)
+        if link.is_symlink() or link.exists():
+            if not link.is_symlink() or link.resolve() != package:
+                raise RuntimeError(f"{link} already exists and does not link to {package}")
+        else:
+            link.symlink_to(package, target_is_directory=True)
         return
     commit_id = "8c1dae1acbb4bcf99c3e473c8ed876f2cd42ba35"
     if not distributed_dir.is_dir():
@@ -419,6 +436,9 @@ def _get_ascend_cmake_args():
     ascendnpu_ir_tag = os.getenv("ASCENDNPU_IR_TAG")
     if ascendnpu_ir_tag is not None:
         cmake_args.append(f"-DASCENDNPU_IR_TAG={ascendnpu_ir_tag}")
+    distributed_src = os.getenv("TRITON_DISTRIBUTED_ASCEND_SRC_DIR")
+    if distributed_src:
+        cmake_args.append(f"-DTRITON_DISTRIBUTED_ASCEND_SRC_DIR={Path(distributed_src).expanduser().resolve()}")
     return cmake_args
 
 
@@ -568,26 +588,27 @@ def patch_module(mod):
     def get_package_dirs():
         yield from _orig_get_package_dirs()
         if mod.check_env_flag("TRITON_BUILD_TD", "OFF"):
-            yield ("triton_dist",
-                   os.path.join("third_party", "ascend", "Triton-distributed-ascend", "python", "triton_dist"))
+            yield ("triton_dist", _distributed_package_dir())
 
     mod.get_package_dirs = get_package_dirs
 
     _orig_get_packages = mod.get_packages
 
     def get_packages():
-        yield from _orig_get_packages()
+        packages = list(_orig_get_packages())
+        yield from packages
         if mod.check_env_flag("TRITON_BUILD_TD", "OFF"):
-            distributed_pkg_root = os.path.join("third_party", "ascend", "Triton-distributed-ascend", "python",
-                                                "triton_dist")
+            existing = set(packages)
+            distributed_pkg_root = _distributed_package_dir()
             if os.path.isdir(distributed_pkg_root):
                 for dirpath, _dirnames, filenames in os.walk(distributed_pkg_root):
                     if "__init__.py" in filenames or \
                             any(f.endswith(".py") for f in filenames):
                         rel = os.path.relpath(dirpath, distributed_pkg_root) \
                             .replace(os.sep, ".")
-                        yield "triton_dist" if rel == "." \
-                            else f"triton_dist.{rel}"
+                        package = "triton_dist" if rel == "." else f"triton_dist.{rel}"
+                        if package not in existing:
+                            yield package
 
     mod.get_packages = get_packages
 
@@ -595,11 +616,11 @@ def patch_module(mod):
 
     def add_links(external_only):
         _orig_add_links(external_only)
-        if not external_only and \
-                mod.check_env_flag("TRITON_BUILD_TD", "OFF"):
-            distributed_dir = (_REPO_ROOT / "third_party" / "ascend" / "Triton-distributed-ascend" / "python" /
-                               "triton_dist").resolve()
+        if not external_only and mod.check_env_flag("TRITON_BUILD_TD", "OFF"):
+            distributed_dir = (_REPO_ROOT / _distributed_package_dir()).resolve()
             distributed_install_dir = _REPO_ROOT / "python" / "triton_dist"
+            if distributed_install_dir.exists() and not distributed_install_dir.is_symlink():
+                raise RuntimeError(f"Refusing to replace existing directory {distributed_install_dir}")
             mod.update_symlink(distributed_install_dir, distributed_dir)
 
     mod.add_links = add_links
